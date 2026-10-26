@@ -53,16 +53,27 @@ $$X_{\text{fused}}^{(l)} = X^{(l)} + \gamma_1 \odot \text{SW-MSA}(X^{(l)}) + \ga
 
 The fused output passes into a Category-Aware Feed-Forward Network (FFN) with depthwise convolutions to produce final layer representations $X^{(l+1)}$.
 
-## 4. Dynamic Photometric Affine Modulation ($\gamma, \beta$)
-To decouple structural geometry from color and luminance variations:
-- The sparse dictionary banks $D_e$ and cross-attention pathway focus exclusively on normalized, channel-independent structural patterns.
-- A parallel lightweight modulation MLP derives dynamic scale ($\gamma$) and shift ($\beta$) vectors per token from input $X$:
-  $$\gamma_i, \beta_i = \text{MLP}(X_i), \quad \gamma_i, \beta_i \in \mathbb{R}^d$$
-- The final token representation before reconstruction is modulated as:
-  $$\hat{X}_{\text{modulated}} = \gamma_i \odot \hat{X}_i + \beta_i$$
+## 4. Multi-Scale Contextual Dynamic Affine Modulation ($\gamma, \beta$)
+To condition photometric modulation on broader spatial context rather than an
+isolated token:
+- The sparse dictionary banks $D_e$ and cross-attention pathway focus on
+  normalized structural patterns.
+- Three parallel depthwise convolution branches operate on the same input
+  feature map, using dilation rates $1$, $2$, and $4$. Their effective
+  receptive fields are $3 \times 3$, $5 \times 5$, and $9 \times 9$,
+  respectively. Concatenating the branches preserves all channels at every
+  scale; a pointwise MLP combines this context.
+- Dynamic scale ($\gamma$) and shift ($\beta$) vectors are derived per token:
+  $$\gamma_i, \beta_i = \text{ContextModulationHead}(X)_i, \quad
+  \gamma_i, \beta_i \in \mathbb{R}^d$$
+- The sparse attention representation is modulated before the attention
+  projection and reconstruction pathway:
+  $$\hat{X}_{\text{modulated},i} =
+    \gamma_i \odot \hat{X}_i + \beta_i$$
 
-The modulation head's final layer is initialized so that $\gamma_i = 1$ and
-$\beta_i = 0$, preserving the original dictionary-attention behavior at
-initialization. In the current restorer, the head predicts modulation from the
-input feature tokens, applies it to the sparse attention output, then passes
-the result through the attention projection before spatial feature fusion.
+The modulation head's final projection is initialized so that $\gamma_i = 1$
+and $\beta_i = 0$, preserving the prior attention output at initialization.
+Depthwise convolution is cheaper than a dense convolution but adds nonzero
+computation and memory traffic. Multi-scale context may improve robustness to
+local noise; this is a hypothesis that requires a controlled restoration
+experiment, not a guarantee.

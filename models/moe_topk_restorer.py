@@ -15,28 +15,59 @@ from models.modules.router import DegradationAwareRouter
 from models.modules.topk_select import sparse_topk_attention
 
 
-class AffineModulationHead(nn.Module):
-    """Predict per-token scale and shift for dictionary-attended features."""
+class ParallelDilatedAffineHead(nn.Module):
+    """Predict per-token scale and shift from parallel multi-scale context."""
 
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
         if hidden_dim < 2:
-            raise ValueError(
-                f"hidden_dim must be at least 2; got {hidden_dim}"
-            )
+            raise ValueError(f"hidden_dim must be at least 2; got {hidden_dim}")
         self.hidden_dim = int(hidden_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+        self.branches = nn.ModuleList(
+            nn.Conv2d(
+                self.hidden_dim,
+                self.hidden_dim,
+                kernel_size=3,
+                padding=rate,
+                dilation=rate,
+                groups=self.hidden_dim,
+            )
+            for rate in (1, 2, 4)
+        )
+        self.proj = nn.Sequential(
+            nn.GELU(),
+            nn.Linear(self.hidden_dim * len(self.branches), self.hidden_dim // 2),
             nn.GELU(),
             nn.Linear(self.hidden_dim // 2, self.hidden_dim * 2),
         )
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        nn.init.zeros_(self.proj[-1].weight)
+        nn.init.zeros_(self.proj[-1].bias)
         with torch.no_grad():
-            self.mlp[-1].bias[: self.hidden_dim].fill_(1.0)
+            self.proj[-1].bias[: self.hidden_dim].fill_(1.0)
 
-    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        params = self.mlp(tokens)
+    def forward(
+        self, tokens: torch.Tensor, height: int, width: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if tokens.ndim != 3 or tokens.size(-1) != self.hidden_dim:
+            raise ValueError(
+                f"expected tokens with shape (B, N, {self.hidden_dim}), "
+                f"got {tuple(tokens.shape)}"
+            )
+        if height <= 0 or width <= 0 or tokens.size(1) != height * width:
+            raise ValueError(
+                f"token count {tokens.size(1)} must equal height*width "
+                f"({height}*{width})"
+            )
+
+        batch = tokens.size(0)
+        feature_map = tokens.transpose(1, 2).reshape(
+            batch, self.hidden_dim, height, width
+        )
+        multi_scale = torch.cat(
+            [branch(feature_map) for branch in self.branches], dim=1
+        )
+        contextual_tokens = multi_scale.flatten(2).transpose(1, 2)
+        params = self.proj(contextual_tokens)
         return params.chunk(2, dim=-1)
 
 
@@ -92,7 +123,7 @@ class MoETopKRestorer(nn.Module):
             num_experts=self.num_experts,
             reduction_ratio=reduction_ratio,
         )
-        self.affine_head = AffineModulationHead(hidden_dim=self.d)
+        self.affine_head = ParallelDilatedAffineHead(hidden_dim=self.d)
         self.attention_projection = nn.Linear(self.d, self.d)
         self.fusion = nn.Conv2d(self.d, self.d, kernel_size=3, padding=1)
         self.reconstruction = nn.Conv2d(self.d, 3, kernel_size=3, padding=1)
@@ -135,7 +166,7 @@ class MoETopKRestorer(nn.Module):
         )
         values = values.flatten(0, 1)
         attention = sparse_topk_attention(scores, values, self.top_k)
-        gamma, beta = self.affine_head(tokens)
+        gamma, beta = self.affine_head(tokens, height, width)
         modulated = gamma * attention.output + beta
         attended = self.attention_projection(modulated)
         attended = attended.transpose(1, 2).reshape(

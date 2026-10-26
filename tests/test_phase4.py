@@ -7,7 +7,7 @@ from PIL import Image
 from experiments.infer_phase4 import main as infer_main
 from experiments.infer_phase4 import tiled_predict
 from experiments.run_phase4 import main as train_main
-from models.moe_topk_restorer import AffineModulationHead, MoETopKRestorer
+from models.moe_topk_restorer import MoETopKRestorer, ParallelDilatedAffineHead
 
 
 @pytest.fixture
@@ -43,29 +43,39 @@ def test_moe_topk_restorer_shapes_gradients_and_auxiliary_loss():
     assert torch.count_nonzero(model.query_projection.weight.grad).item() > 0
     assert model.dictionary.dictionary.grad is not None
     assert torch.count_nonzero(model.dictionary.dictionary.grad).item() > 0
-    assert model.affine_head.mlp[-1].weight.grad is not None
-    assert torch.count_nonzero(model.affine_head.mlp[-1].weight.grad).item() > 0
+    assert model.affine_head.proj[-1].weight.grad is not None
+    assert torch.count_nonzero(model.affine_head.proj[-1].weight.grad).item() > 0
 
 
-def test_affine_modulation_head_is_identity_initialized_and_differentiable():
-    head = AffineModulationHead(hidden_dim=16)
-    tokens = torch.randn(2, 5, 16, requires_grad=True)
+def test_parallel_dilated_head_is_identity_initialized_and_differentiable():
+    head = ParallelDilatedAffineHead(hidden_dim=16)
+    tokens = torch.randn(2, 16, 16, requires_grad=True)
 
-    gamma, beta = head(tokens)
+    gamma, beta = head(tokens, height=4, width=4)
     modulated = gamma * tokens + beta
-    modulated.sum().backward()
 
     assert gamma.shape == beta.shape == tokens.shape
     assert torch.equal(gamma, torch.ones_like(gamma))
     assert torch.equal(beta, torch.zeros_like(beta))
-    assert head.mlp[-1].weight.grad is not None
-    assert torch.count_nonzero(head.mlp[-1].weight.grad).item() > 0
+
+    torch.nn.init.normal_(head.proj[-1].weight)
+    gamma, beta = head(tokens, height=4, width=4)
+    modulated = gamma * tokens + beta
+    modulated.sum().backward()
+    assert head.proj[-1].weight.grad is not None
+    assert torch.count_nonzero(head.proj[-1].weight.grad).item() > 0
+    assert all(branch.weight.grad is not None for branch in head.branches)
     assert tokens.grad is not None
 
 
-def test_affine_modulation_head_rejects_too_small_hidden_dimension():
+def test_parallel_dilated_head_validates_token_grid_and_dimensions():
     with pytest.raises(ValueError, match="hidden_dim must be at least 2"):
-        AffineModulationHead(hidden_dim=1)
+        ParallelDilatedAffineHead(hidden_dim=1)
+    head = ParallelDilatedAffineHead(hidden_dim=16)
+    with pytest.raises(ValueError, match="token count 5 must equal height\\*width"):
+        head(torch.randn(1, 5, 16), height=2, width=2)
+    with pytest.raises(ValueError, match="expected tokens with shape"):
+        head(torch.randn(1, 16, 8), height=4, width=4)
 
 
 def test_tiled_inference_covers_image_and_preserves_shape():

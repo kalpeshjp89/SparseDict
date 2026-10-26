@@ -250,7 +250,7 @@ continuation context.
 ### Task 4.1
 
 - **Title:** Micro-Dataset Data Pipeline
-- **Status:** Pipeline is implemented and the decoded-image cache optimization is in place; the real-data <100 ms acceptance measurement is pending.
+- **Status:** Pipeline and decoded-image cache are implemented; the real-data benchmark ran on Colab but did not meet the <100 ms acceptance target.
 - **Relevant files:** `data/micro_loader.py`, `data/__init__.py`,
   `scripts/download_div2k.py`, `experiments/run_phase4.py`,
   `experiments/infer_phase4.py`, `tests/test_micro_loader.py`,
@@ -310,13 +310,19 @@ continuation context.
   any mode's mean is not below the configured threshold. Focused benchmark and
   loader tests passed (12 tests); these fixture results do not establish
   real-DIV2K performance.
-- **What did not / blockers:** The Colab measurements above are the uncached
-  baseline and exceed the <100 ms criterion. The local environment has no
-  DIV2K files, so the optimization cannot yet be measured against target images
-  here. Re-run warmed per-image timings for all three modes on the same
-  ten-image Colab subset; do not mark Task 4.1 complete based only on fixture
-  tests. PyTorch emitted a non-fatal warning that NumPy is not installed; this
-  loader does not require NumPy.
+- **Cached Colab benchmark:** The updated benchmark ran over ten real DIV2K
+  images on the Tesla T4 (`torch 2.11.0+cu130`, Python 3.13.16) with one
+  warm-up pass and three measured passes (30 fetches per mode). Mean / median /
+  max per-pair fetch times were **178.56 / 169.92 / 255.42 ms** for noise,
+  **81.32 / 82.69 / 110.76 ms** for 4x super-resolution, and
+  **133.94 / 134.13 / 181.96 ms** for rain. Only super-resolution passed the
+  `<100 ms` mean target; overall benchmark result was **FAIL**. Dataset-cache
+  initialization took about 1.07-1.26 seconds per degradation-specific dataset
+  construction and is reported separately from warmed fetch latency. Results
+  were confirmed from the downloaded `s.zip` archive.
+- **What did not / blockers:** The cached loader has not passed its target;
+  noise and rain remain above target and need profiling/optimization. The local
+  environment has no DIV2K images for independent performance reproduction.
 - **Colab download and smoke check:** After cloning the project, install
   `requirements.txt`, then run
   `python -m scripts.download_div2k --output-dir /content/DIV2K
@@ -341,9 +347,8 @@ continuation context.
   alongside the Colab runtime/hardware details. A zero exit status means each
   mode's mean fetch latency is strictly below 100 ms; inspect median/max as
   well before accepting the result.
-- **Next:** Re-run the warmed ten-image Colab benchmark for noise, 4x
-  super-resolution, and rain. If any mode remains over 100 ms, profile and
-  optimize its CPU degradation step before changing the acceptance criterion.
+- **Next:** Profile noise and rain generation separately from cached image
+  fetch; retain super-resolution as a passing mode for this timing procedure.
 - **Last updated:** 2026-10-26
 
 ### Task 4.2
@@ -368,27 +373,34 @@ continuation context.
   training/checkpoint round-trip, and tiled image output. The complete local
   suite passed (67 tests), and the Phase 1 runner remains green.
 - **Colab run:** Executed 200 epochs on the ten-image DIV2K subset on a Tesla T4
-  (`torch 2.11.0+cu130`, CUDA available), using the notebook's noise degradation
-  configuration. Fixed-crop validation PSNR was **28.6012 dB**, below the
-  **29.5 dB** target. Tiled full-image inference completed for all ten images;
-  mean full-image PSNR was **29.3414 dB**, also below target by about **0.1586
-  dB**. These figures use different evaluation procedures and should not be
-  conflated. The 128-pixel tiled inference over all ten images took about five
-  minutes.
+  (`torch 2.11.0+cu130`, CUDA available), using noise degradation, `d=96`, and
+  the identity-initialized tokenwise affine head. Fixed-crop validation PSNR
+  was **28.6143 dB**, below the **29.5 dB** target. Tiled full-image inference
+  completed for all ten images; mean full-image PSNR was **29.3415 dB**, also
+  below target by about **0.1585 dB**. The previous run reported 28.6012 dB
+  fixed-crop and 29.3414 dB tiled PSNR, but this iteration changed both model
+  width and the modulation head, so it does not isolate the capacity effect.
+  These evaluation procedures are distinct and should not be conflated.
+- **Preserved artifacts:** The downloaded `C:\Users\Kalpesh\Downloads\s.zip`
+  contains the `d=96` tokenwise-affine checkpoint, training metrics, tiled
+  restored images and metrics, and `loader_benchmark.json`. It is retained
+  locally; its measured results are the baseline for the next comparison.
 - **What did not / blockers:** The experiment completed and produced a
   checkpoint, but it did not meet the PSNR acceptance criterion. The local
-  environment remains CPU-only and has no DIV2K files. The notebook's final
-  cell created the results archive and initiated its browser download; local
-  receipt of the archive was not confirmed in this workspace.
-- **Diagnostic hypotheses:** Limited feature width (`d=64`), reconstruction
-  loss choice, and router/top-k settings may constrain reconstruction quality;
-  these are hypotheses, not established causes. Fixed-crop and tiled full-image
-  metrics are distinct and must continue to be reported separately.
-- **Next:** Run a controlled capacity/schedule iteration (first compare
-  `d=96` or `d=128` using the existing `--dim` option, then consider cosine
-  learning-rate scheduling or a gradient loss only if needed). Keep the data,
-  seed, degradation, and evaluation procedure fixed, and do not mark Task 4.2
-  complete unless fixed-crop validation reaches 29.5 dB.
+  environment remains CPU-only and has no DIV2K files. The baseline checkpoint
+  and metrics archive is available locally; the new parallel-head comparison
+  still requires Colab GPU execution.
+- **Diagnostic hypotheses:** Feature capacity, reconstruction loss, and
+  router/top-k settings may constrain reconstruction quality; these are
+  unconfirmed hypotheses. The `d=96` run also included an affine head, so its
+  small fixed-crop change cannot be attributed to width alone. Fixed-crop and
+  tiled full-image metrics are distinct and must continue to be reported
+  separately.
+- **Next:** Run the parallel multi-scale dilation head as a separate output
+  variant at `d=96`, keeping data, seed, degradation, schedule, top-k, and
+  fixed-crop/tiled procedures identical to the tokenwise-affine run. Compare
+  both validation and tiled PSNR; do not mark Task 4.2 complete unless
+  fixed-crop validation reaches 29.5 dB.
 - **Last updated:** 2026-10-26
 
 ## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
