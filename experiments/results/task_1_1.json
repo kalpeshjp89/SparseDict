@@ -1,0 +1,36 @@
+{
+  "pass": true,
+  "x_shape": [
+    2,
+    64,
+    64
+  ],
+  "x_out_shape": [
+    2,
+    64,
+    64
+  ],
+  "expected_x_out_shape": [
+    2,
+    64,
+    64
+  ],
+  "k_d_shape": [
+    256,
+    16
+  ],
+  "v_d_shape": [
+    256,
+    64
+  ],
+  "d": 64,
+  "d_k": 16,
+  "r": 4,
+  "M": 256,
+  "tau": 1.0,
+  "tau_0": 1.0,
+  "M_0": 256,
+  "param_count": 22528,
+  "dictionary_params": 16384,
+  "hyperparams": "| name | value | source | rationale |\n|---|---|---|---|\n| `D` | `64` | 01_architecture_overview.md \u00a72 Hidden Dimension | Lightweight hidden size from the spec; keeps toy runs on CPU while matching the 'lightweight' column. |\n| `REDUCTION_RATIO` | `4` | 01_architecture_overview.md \u00a72; todo Task 1.1 | Key/query bottleneck: d_k = d / r. Cuts affinity cost by 4x vs full-d attention without changing output dim. |\n| `M` | `256` | todo.md Phase 0 Task 0.1 | Phase-0 toy dictionary, not the full 4096-atom bank. Fail-fast: enough atoms to exercise softmax over M, cheap enough for 50 CPU steps. |\n| `N` | `64` | fail-fast vs 01_architecture_overview.md N=4096 example | Token count for the smoke test. Full 64x64-patch N=4096 is a later latency target; 64 tokens still gives a real B\u00d7N\u00d7M affinity. |\n| `B` | `2` | todo.md Phase 0 Task 0.1 | Minimum batch that still exercises batched matmul (not a singleton that hides broadcast bugs). |\n| `TAU_0` | `1.0` | 03_topk_sparsification_gradients.md \u00a72 | Start of the documented cosine anneal (1.0 \u2192 0.05). Phase 1 is un-sparsified dense softmax; keep tau_0 at the training start so logits are not over-sharpened yet. |\n| `M_0` | `256` | 03_topk_sparsification_gradients.md \u00a72; chosen M_0 = current toy M | Reference dictionary size in tau = tau_0 * log(M_active)/log(M_0). Set equal to the toy M so tau=1.0 now; when M grows to 4096, tau scales automatically to log(4096)/log(256)=1.5. |\n| `USE_BIAS` | `False` | Vaswani et al. convention; not specified in SparseDict notes so defaulted off | Standard Transformer Q/K/V projections omit bias; extra bias on keys would add a query-independent offset to every atom score. |\n| `LR` | `0.001` | engineering default for toy overfit; not in the specs | Adam default-ish step size for a tiny MSE reconstruction. Large enough that 50 steps should move loss; small enough to avoid exploding the dense M-way softmax. |\n| `STEPS` | `50` | todo.md Task 1.2 | Exact verification budget from Task 1.2. |\n| `SEED` | `0` | engineering default | Reproducible toy run so analysis numbers can be compared after hyperparameter changes. |\n| `WEIGHT_DECAY` | `0.0` | engineering default for overfit test | Smoke test is capacity/overfit, not generalization. Decay would fight the 'loss must drop' check. |\n| `d_k` (derived) | `16` | d / r | Query/key width after reduction. |"
+}
