@@ -52,3 +52,17 @@ For input tokens $X^{(l)}$ at layer $l$, the outputs of both pathways are fused 
 $$X_{\text{fused}}^{(l)} = X^{(l)} + \gamma_1 \odot \text{SW-MSA}(X^{(l)}) + \gamma_2 \odot \text{MoE-TopK-TDCA}(X^{(l)})$$
 
 The fused output passes into a Category-Aware Feed-Forward Network (FFN) with depthwise convolutions to produce final layer representations $X^{(l+1)}$.
+
+## 4. Dynamic Photometric Affine Modulation ($\gamma, \beta$)
+To decouple structural geometry from color and luminance variations:
+- The sparse dictionary banks $D_e$ and cross-attention pathway focus exclusively on normalized, channel-independent structural patterns.
+- A parallel lightweight modulation MLP derives dynamic scale ($\gamma$) and shift ($\beta$) vectors per token from input $X$:
+  $$\gamma_i, \beta_i = \text{MLP}(X_i), \quad \gamma_i, \beta_i \in \mathbb{R}^d$$
+- The final token representation before reconstruction is modulated as:
+  $$\hat{X}_{\text{modulated}} = \gamma_i \odot \hat{X}_i + \beta_i$$
+
+The modulation head's final layer is initialized so that $\gamma_i = 1$ and
+$\beta_i = 0$, preserving the original dictionary-attention behavior at
+initialization. In the current restorer, the head predicts modulation from the
+input feature tokens, applies it to the sparse attention output, then passes
+the result through the attention projection before spatial feature fusion.

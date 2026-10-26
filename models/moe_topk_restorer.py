@@ -15,6 +15,31 @@ from models.modules.router import DegradationAwareRouter
 from models.modules.topk_select import sparse_topk_attention
 
 
+class AffineModulationHead(nn.Module):
+    """Predict per-token scale and shift for dictionary-attended features."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        if hidden_dim < 2:
+            raise ValueError(
+                f"hidden_dim must be at least 2; got {hidden_dim}"
+            )
+        self.hidden_dim = int(hidden_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim // 2, self.hidden_dim * 2),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+        with torch.no_grad():
+            self.mlp[-1].bias[: self.hidden_dim].fill_(1.0)
+
+    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        params = self.mlp(tokens)
+        return params.chunk(2, dim=-1)
+
+
 class MoETopKRestorer(nn.Module):
     """Restore RGB images using routed expert dictionaries and sparse attention.
 
@@ -67,6 +92,7 @@ class MoETopKRestorer(nn.Module):
             num_experts=self.num_experts,
             reduction_ratio=reduction_ratio,
         )
+        self.affine_head = AffineModulationHead(hidden_dim=self.d)
         self.attention_projection = nn.Linear(self.d, self.d)
         self.fusion = nn.Conv2d(self.d, self.d, kernel_size=3, padding=1)
         self.reconstruction = nn.Conv2d(self.d, 3, kernel_size=3, padding=1)
@@ -109,7 +135,9 @@ class MoETopKRestorer(nn.Module):
         )
         values = values.flatten(0, 1)
         attention = sparse_topk_attention(scores, values, self.top_k)
-        attended = self.attention_projection(attention.output)
+        gamma, beta = self.affine_head(tokens)
+        modulated = gamma * attention.output + beta
+        attended = self.attention_projection(modulated)
         attended = attended.transpose(1, 2).reshape(
             batch, channels, height, width
         )

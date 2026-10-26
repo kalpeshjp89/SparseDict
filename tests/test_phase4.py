@@ -7,7 +7,7 @@ from PIL import Image
 from experiments.infer_phase4 import main as infer_main
 from experiments.infer_phase4 import tiled_predict
 from experiments.run_phase4 import main as train_main
-from models.moe_topk_restorer import MoETopKRestorer
+from models.moe_topk_restorer import AffineModulationHead, MoETopKRestorer
 
 
 @pytest.fixture
@@ -43,6 +43,29 @@ def test_moe_topk_restorer_shapes_gradients_and_auxiliary_loss():
     assert torch.count_nonzero(model.query_projection.weight.grad).item() > 0
     assert model.dictionary.dictionary.grad is not None
     assert torch.count_nonzero(model.dictionary.dictionary.grad).item() > 0
+    assert model.affine_head.mlp[-1].weight.grad is not None
+    assert torch.count_nonzero(model.affine_head.mlp[-1].weight.grad).item() > 0
+
+
+def test_affine_modulation_head_is_identity_initialized_and_differentiable():
+    head = AffineModulationHead(hidden_dim=16)
+    tokens = torch.randn(2, 5, 16, requires_grad=True)
+
+    gamma, beta = head(tokens)
+    modulated = gamma * tokens + beta
+    modulated.sum().backward()
+
+    assert gamma.shape == beta.shape == tokens.shape
+    assert torch.equal(gamma, torch.ones_like(gamma))
+    assert torch.equal(beta, torch.zeros_like(beta))
+    assert head.mlp[-1].weight.grad is not None
+    assert torch.count_nonzero(head.mlp[-1].weight.grad).item() > 0
+    assert tokens.grad is not None
+
+
+def test_affine_modulation_head_rejects_too_small_hidden_dimension():
+    with pytest.raises(ValueError, match="hidden_dim must be at least 2"):
+        AffineModulationHead(hidden_dim=1)
 
 
 def test_tiled_inference_covers_image_and_preserves_shape():

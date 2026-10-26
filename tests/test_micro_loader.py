@@ -69,6 +69,17 @@ def test_loader_yields_corrupted_clean_pairs(image_directory):
     assert corrupted.shape == clean.shape == (1, 3, 40, 32)
 
 
+def test_dataset_uses_cached_images_after_source_files_are_removed(image_directory):
+    dataset = DIV2KMicroDataset(image_directory, "noise", image_count=1)
+    expected_clean = dataset[0][1]
+    dataset.image_paths[0].unlink()
+
+    corrupted, clean = dataset[0]
+
+    assert torch.equal(clean, expected_clean)
+    assert corrupted.shape == clean.shape
+
+
 def test_accepts_parent_directory_containing_div2k_folder(image_directory):
     dataset = DIV2KMicroDataset(image_directory.parent, "rain")
 

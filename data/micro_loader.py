@@ -77,6 +77,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 f"found {len(images)}"
             )
         self.image_paths = images[: self.image_count]
+        self._images = [_load_rgb_tensor(path) for path in self.image_paths]
 
     def __len__(self) -> int:
         return self.image_count
@@ -92,7 +93,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         if not 0 <= index < self.image_count:
             raise IndexError(index)
-        clean = _load_rgb_tensor(self.image_paths[index])
+        clean = self._images[index]
         generator = torch.Generator(device="cpu").manual_seed(
             self.seed
             + (0 if self.fixed_crop else self.epoch * self.image_count)
@@ -100,6 +101,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         )
         if self.patch_size is not None:
             clean = _random_crop(clean, self.patch_size, generator)
+        clean = clean.to(dtype=torch.float32).div_(255)
 
         if self.degradation == "noise":
             noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
@@ -182,7 +184,7 @@ def _load_rgb_tensor(path: Path) -> torch.Tensor:
         rgb = image.convert("RGB")
         width, height = rgb.size
         pixels = torch.frombuffer(bytearray(rgb.tobytes()), dtype=torch.uint8)
-    return pixels.view(height, width, 3).permute(2, 0, 1).contiguous().float().div_(255)
+    return pixels.view(height, width, 3).permute(2, 0, 1).contiguous()
 
 
 def _random_crop(

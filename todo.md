@@ -57,15 +57,16 @@ Phase 3: Top-$K$ Sparsification & Differentiable Backpropagation
   - Verification: Run `torch.autograd.gradcheck` on mock scores; confirm non-zero gradients flow back to $W_Q$ and dictionary parameters.
 
 Phase 4: Micro-Validation & Overfitting Smoke Test
-- [ ] Task 4.1: Micro-Dataset Data Pipeline (3 hrs; local code complete, dataset verification pending) ([progress](./progress.md#task-41))
+- [ ] Task 4.1: Micro-Dataset Data Pipeline (3 hrs; cache optimization implemented, real-data latency recheck pending) ([progress](./progress.md#task-41))
   - Implement `data/micro_loader.py` loading exactly 10 high-resolution images (from DIV2K).
   - Add `scripts/download_div2k.py` to download/extract the first 10 DIV2K training-HR images on Colab.
   - Add synthetic degradations: Gaussian noise ($\sigma=25$), bicubic downsampling ($4\times$), and synthetic rain streaks.
   - Verification: DataLoader yields corrupted and clean pairs in $<100$ ms.
-  - Status: Loader and downloader implemented and locally fixture-tested; real DIV2K/Colab latency verification is pending because the dataset and GPU runtime are not available locally.
-- [ ] Task 4.2: 10-Image Micro-Overfitting Test (4 hrs; code complete, Colab run pending) ([progress](./progress.md#task-42))
+  - Status: Loader and downloader were exercised on ten real DIV2K images in Colab; the uncached warmed latency baseline was 241.2 ms/pair (noise), 181.1 ms/pair (4x SR), and 201.9 ms/pair (rain). The loader now caches decoded CPU uint8 images and avoids reopening files in `__getitem__`. `python -m experiments.bench_micro_loader --data-root /content/DIV2K --image-count 10 --warmup-passes 1 --repeats 3 --max-ms 100 --json-output /content/loader_benchmark.json` reruns all three modes and saves comparable metrics; execute it on Colab before considering the latency requirement met.
+- [ ] Task 4.2: 10-Image Micro-Overfitting Test (4 hrs; Colab run completed, PSNR acceptance not met) ([progress](./progress.md#task-42))
   - Run 200 training epochs of the complete MoE Top-$K$ model on the 10 micro images using $L_1$ reconstruction loss + $\mathcal{L}_{\text{aux}}$.
   - Verification: Reconstruction PSNR must reach $\ge 29.5\text{ dB}$, confirming model capacity and optimization stability.
+  - Status: Completed 200 epochs on a Colab T4; fixed-crop validation PSNR was 28.6012 dB and mean tiled full-image PSNR was 29.3414 dB. Both remain below the required 29.5 dB. Next, test a controlled capacity change (`--dim 96` or `--dim 128`) while keeping other settings fixed; see [progress](./progress.md#task-42) for details.
 
 Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
 - [ ] Task 5.1: Triton Kernel Block-Tile Layout & SRAM Loader (4 hrs) ([progress](./progress.md#task-51))

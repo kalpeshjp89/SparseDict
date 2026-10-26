@@ -250,20 +250,24 @@ continuation context.
 ### Task 4.1
 
 - **Title:** Micro-Dataset Data Pipeline
-- **Status:** Implemented and locally fixture-tested; DIV2K/Colab verification pending.
+- **Status:** Pipeline is implemented and the decoded-image cache optimization is in place; the real-data <100 ms acceptance measurement is pending.
 - **Relevant files:** `data/micro_loader.py`, `data/__init__.py`,
   `scripts/download_div2k.py`, `experiments/run_phase4.py`,
   `experiments/infer_phase4.py`, `tests/test_micro_loader.py`,
-  `tests/test_download_div2k.py`, `tests/test_phase4.py`, `requirements.txt`
+  `tests/test_download_div2k.py`, `tests/test_phase4.py`,
+  `experiments/bench_micro_loader.py`, `tests/test_bench_micro_loader.py`,
+  `requirements.txt`
 - **Acceptance:** Load exactly 10 DIV2K images and generate Gaussian-noise,
   4x bicubic-downsample, and synthetic-rain degradations; yield corrupted and
   clean pairs in under 100 ms.
 - **What works / evidence:** Added `DIV2KMicroDataset` and
   `create_micro_dataloader()`. The dataset deterministically selects the first
   ten sorted image files from either `DIV2K_train_HR` or its parent, decodes
-  RGB into `[0,1]` tensors, and returns paired inputs/targets for one selected
-  degradation mode: Gaussian noise with sigma 25 on the 8-bit scale, bicubic
-  4x downsampling, or synthetic diagonal rain. Loader defaults to batch size 1
+  RGB into compact CPU `uint8` tensors once during initialization, and returns
+  paired inputs/targets for one selected degradation mode: Gaussian noise with
+  sigma 25 on the 8-bit scale, bicubic 4x downsampling, or synthetic diagonal
+  rain. `__getitem__` reuses those cached tensors and crops before float
+  conversion when patch training is enabled. Loader defaults to batch size 1
   to support variable source dimensions and the lower-resolution SR input.
   Added Pillow to `requirements.txt` and a CLI smoke check suitable for a
   mounted/unzipped Colab dataset. Added `scripts/download_div2k.py`, which
@@ -279,16 +283,40 @@ continuation context.
   downloader tests cover resume, extraction count/order, integrity, unsafe
   paths, license acknowledgement, and skipping re-download when files already
   exist. The full project suite passed (62 tests).
-- **Local performance evidence:** With generated 512x512 PNG fixtures, warmed
+- **Pre-optimization local performance evidence:** With generated 512x512 PNG fixtures, warmed
   per-image fetch/degradation averaged 30.3 ms for noise, 14.1 ms for
   super-resolution, and 14.1 ms for rain on this CPU. The first fetch includes
-  initialization overhead and is not represented by these warmed measurements.
-- **What did not / blockers:** No DIV2K dataset, CUDA device, or Colab runtime
-  is available in this workspace. Therefore selection against actual DIV2K
-  files and the <100 ms requirement on the intended high-resolution images
-  remain unverified. Test fixtures demonstrate behavior but do not substitute
-  for dataset or target-hardware verification. PyTorch also emits a non-fatal
-  warning that NumPy is not installed; this loader does not require NumPy.
+  initialization overhead and is not represented by these warmed measurements;
+  these measurements predate the decoded-image cache.
+- **Colab evidence:** Downloaded and extracted the first ten real DIV2K
+  training-HR images in the Colab runtime and used them in the Phase 4 noise
+  training and full-image inference runs on a Tesla T4 (`torch 2.11.0+cu130`,
+  CUDA available). A warmed `DataLoader` pass over all ten images measured
+  **241.2 ms/pair** for noise (max 312.4 ms), **181.1 ms/pair** for 4x
+  super-resolution (max 214.1 ms), and **201.9 ms/pair** for rain (max
+  282.8 ms). The HR tensors were `(1, 3, 1644, 2040)`; SR inputs were
+  `(1, 3, 411, 510)`. This confirms real-data compatibility but fails the
+  <100 ms latency target in the current CPU-side pipeline.
+- **Optimization iteration:** The dataset now preloads the selected files once
+  as CPU `uint8` tensors (about one quarter the storage of float32 source
+  tensors) and reuses them instead of decoding on every fetch. Patch training
+  crops cached pixels before float conversion. A regression test verifies
+  access still works after the source file is removed. This removes repeated
+  disk decoding but does not eliminate full-resolution CPU degradation costs.
+- **Benchmark tooling:** Added `experiments/bench_micro_loader.py` to run all
+  three degradations with configurable warm-up and repeat passes. It reports
+  mean, median, and maximum per-pair `DataLoader` fetch latency, records cache
+  initialization time separately, optionally writes JSON, and exits nonzero if
+  any mode's mean is not below the configured threshold. Focused benchmark and
+  loader tests passed (12 tests); these fixture results do not establish
+  real-DIV2K performance.
+- **What did not / blockers:** The Colab measurements above are the uncached
+  baseline and exceed the <100 ms criterion. The local environment has no
+  DIV2K files, so the optimization cannot yet be measured against target images
+  here. Re-run warmed per-image timings for all three modes on the same
+  ten-image Colab subset; do not mark Task 4.1 complete based only on fixture
+  tests. PyTorch emitted a non-fatal warning that NumPy is not installed; this
+  loader does not require NumPy.
 - **Colab download and smoke check:** After cloning the project, install
   `requirements.txt`, then run
   `python -m scripts.download_div2k --output-dir /content/DIV2K
@@ -305,15 +333,23 @@ continuation context.
   iteration yields `(corrupted, clean)`; move tensors to the model device in
   the Colab inference/training loop. Official dataset information and license:
   [DIV2K dataset page](https://data.vision.ee.ethz.ch/cvl/DIV2K/).
-- **Next:** Run the smoke check with the real ten DIV2K images on Colab/GPU,
-  time warmed pair generation for each mode, and record actual shapes and
-  latency. Then prepare the end-to-end inference/overfit run in Task 4.2.
+- **Benchmark command:** After extraction, run
+  `python -m experiments.bench_micro_loader --data-root /content/DIV2K
+  --image-count 10 --warmup-passes 1 --repeats 3 --max-ms 100
+  --json-output /content/loader_benchmark.json`. It runs noise, 4x
+  super-resolution, and rain against the same selected images; retain the JSON
+  alongside the Colab runtime/hardware details. A zero exit status means each
+  mode's mean fetch latency is strictly below 100 ms; inspect median/max as
+  well before accepting the result.
+- **Next:** Re-run the warmed ten-image Colab benchmark for noise, 4x
+  super-resolution, and rain. If any mode remains over 100 ms, profile and
+  optimize its CPU degradation step before changing the acceptance criterion.
 - **Last updated:** 2026-10-26
 
 ### Task 4.2
 
 - **Title:** 10-Image Micro-Overfitting Test
-- **Status:** Training/inference code implemented and locally smoke-tested; 200-epoch DIV2K run pending.
+- **Status:** Training/inference code implemented and locally smoke-tested; the 200-epoch DIV2K noise run and full-image inference completed on Colab, but the 29.5 dB acceptance target was not met.
 - **Relevant files:** `models/moe_topk_restorer.py`,
   `experiments/run_phase4.py`, `experiments/infer_phase4.py`,
   `tests/test_phase4.py`
@@ -331,17 +367,28 @@ continuation context.
   PSNR and latency. Local tests cover forward shapes, gradient flow, two-epoch
   training/checkpoint round-trip, and tiled image output. The complete local
   suite passed (67 tests), and the Phase 1 runner remains green.
-- **What did not / blockers:** The 200-epoch DIV2K run, 29.5 dB target, and
-  full-image GPU inference have not been executed because the local environment
-  has no DIV2K dataset or CUDA device. Colab is authenticated in the browser, but no runtime has been started yet.
-- **Next:** Run the Colab setup after account authentication: download the
-  ten-image DIV2K subset, run `python -m experiments.run_phase4
-  --data-root /content/DIV2K --degradation noise --epochs 200`, inspect
-  `experiments/phase4/metrics.json` for the PSNR threshold, then run
-  `python -m experiments.infer_phase4 --data-root /content/DIV2K
-  --checkpoint experiments/phase4/moe_topk_restorer.pt` and preserve metrics
-  and restored outputs. The browser is authenticated and the repository push is authorized; push the
-  tested changes, open the committed Colab notebook, and start a GPU runtime.
+- **Colab run:** Executed 200 epochs on the ten-image DIV2K subset on a Tesla T4
+  (`torch 2.11.0+cu130`, CUDA available), using the notebook's noise degradation
+  configuration. Fixed-crop validation PSNR was **28.6012 dB**, below the
+  **29.5 dB** target. Tiled full-image inference completed for all ten images;
+  mean full-image PSNR was **29.3414 dB**, also below target by about **0.1586
+  dB**. These figures use different evaluation procedures and should not be
+  conflated. The 128-pixel tiled inference over all ten images took about five
+  minutes.
+- **What did not / blockers:** The experiment completed and produced a
+  checkpoint, but it did not meet the PSNR acceptance criterion. The local
+  environment remains CPU-only and has no DIV2K files. The notebook's final
+  cell created the results archive and initiated its browser download; local
+  receipt of the archive was not confirmed in this workspace.
+- **Diagnostic hypotheses:** Limited feature width (`d=64`), reconstruction
+  loss choice, and router/top-k settings may constrain reconstruction quality;
+  these are hypotheses, not established causes. Fixed-crop and tiled full-image
+  metrics are distinct and must continue to be reported separately.
+- **Next:** Run a controlled capacity/schedule iteration (first compare
+  `d=96` or `d=128` using the existing `--dim` option, then consider cosine
+  learning-rate scheduling or a gradient loss only if needed). Keep the data,
+  seed, degradation, and evaluation procedure fixed, and do not mark Task 4.2
+  complete unless fixed-crop validation reaches 29.5 dB.
 - **Last updated:** 2026-10-26
 
 ## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
@@ -354,9 +401,11 @@ continuation context.
   coalesced loads; compile without execution crashes.
 - **What works / evidence:** No implementation or verification recorded.
 - **What did not / blockers:** Triton and compatible GPU availability have not
-  been checked.
-- **Next:** Check GPU/Triton environment and supported toolchain; implement the
-  tile/load structure and record compile validation.
+  been checked. Phase 5 implementation is gated on Tasks 4.1 and 4.2 meeting
+  their acceptance criteria.
+- **Next:** After both Phase 4 acceptance checks pass, check GPU/Triton
+  availability and the supported toolchain; implement the tile/load structure
+  and record compile validation.
 - **Last updated:** 2026-10-26
 
 ### Task 5.2
