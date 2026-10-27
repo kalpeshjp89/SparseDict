@@ -514,7 +514,7 @@ continuation context.
 ### Task 5.3
 
 - **Title:** SRAM Gather-and-Densify Online Softmax Accumulator
-- **Status:** Implemented; CUDA/Triton execution and numerical acceptance remain pending.
+- **Status:** Accepted. The online softmax aggregation passed the T4 CUDA suite and reference tolerance.
 - **Acceptance:** Fuse selected-value aggregation and online softmax; match the
   PyTorch reference within max absolute error `1e-5`.
 - **What works / evidence:** Added `tiled_topk_aggregate` to
@@ -526,29 +526,48 @@ continuation context.
   k, key, query, and feature dimensions; the test enforces maximum absolute
   error `<=1e-5`.
 - **What did not / blockers:** This host has CPU-only PyTorch and no Triton;
-  GPU compilation and the numerical tolerance have not been verified.
-- **Next:** Run `pytest tests/test_fused_topk_attn.py` on the T4, fix any
-  compatibility or numerical issues, record maximum error, then accept Task 5.3.
+  local CUDA execution is unavailable. The Colab T4 run compiled and exercised
+  the CUDA tests.
+- **Colab T4 validation (2026-10-27):** On Tesla T4 with PyTorch
+  **2.11.0+cu130**, CUDA **13.0**, and Triton **3.6.0**, the complete focused
+  kernel test file passed **35 tests**. This includes the mixed score/value
+  dtype aggregation cases; each enforces max absolute error `<=1e-5`. The
+  separate float32 benchmark reference comparisons measured max error from
+  **2.38e-7** to **4.77e-7**.
+- **Next:** Proceed to Task 5.4.
 - **Last updated:** 2026-10-27
 
 ### Task 5.4
 
 - **Title:** Latency & Memory Bandwidth Benchmarking
-- **Status:** Benchmark harness implemented; T4 measurements pending.
+- **Status:** Aggregation microbenchmark completed; full fused-pipeline acceptance remains pending.
 - **Acceptance:** Benchmark PyTorch and Triton at `N={1024, 4096, 16384}` and
   show at least 2.5x latency reduction at `N=4096`.
 - **What works / evidence:** Added `tests/bench_kernel.py`, which benchmarks
   selected-value softmax aggregation against an equivalent PyTorch reference
   using synchronized CUDA events, warmups, repeated batches, max-error checks,
-  and runtime metadata.
+  and runtime metadata. On a Tesla T4 (`torch 2.11.0+cu130`, CUDA **13.0**,
+  Triton **3.6.0**, Python **3.13.16**) with `key_count=4096`, `k=32`, and
+  `value_dim=64`, median PyTorch / Triton latency and speedup were:
+
+  | N queries | PyTorch (ms) | Triton (ms) | Speedup | Max abs. error |
+  |-----------|-------------:|------------:|--------:|---------------:|
+  | 1,024     | 0.2500       | 0.0615      | 4.06x   | 2.38e-7        |
+  | 4,096     | 0.8906       | 0.2248      | 3.96x   | 4.77e-7        |
+  | 16,384    | 3.2457       | 0.7454      | 4.35x   | 4.77e-7        |
+
+  Timings used five warmups and the median of three CUDA-event batches with
+  twenty repetitions each. The `N=4096` aggregation microbenchmark exceeds
+  the 2.5x target.
 - **Scope note:** This benchmark isolates Task 5.3 aggregation with precomputed
   top-k scores and indices. It does not measure end-to-end affinity and
   selection, so it cannot establish the full fused-kernel speedup target by
-  itself.
-- **What did not / blockers:** T4 timings and task acceptance remain pending.
-- **Next:** Run the aggregation tests and benchmark on T4. Report whether the
-  `N=4096` speedup meets 2.5x; if it does not, retain the result and plan a
-  properly fused end-to-end benchmark rather than claiming acceptance.
+  itself. The current benchmark reports the aggregation stage only.
+- **What did not / blockers:** End-to-end fused affinity, top-k selection, and
+  value aggregation are not yet one kernel; full-pipeline latency and memory
+  bandwidth reduction remain unmeasured.
+- **Next:** Implement and benchmark the fused end-to-end path before marking
+  Task 5.4 accepted.
 - **Last updated:** 2026-10-27
 
 ## Phase 6: Multi-Task Scaling & Dataset Benchmarking
