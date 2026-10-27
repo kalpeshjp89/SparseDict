@@ -51,6 +51,11 @@ def test_benchmark_reports_all_modes_and_writes_json(tmp_path, capsys):
     assert all(
         entry["cached_noise_bytes"] == 0 for entry in report["results"][1:]
     )
+    assert report["results"][2]["cached_rain_bytes"] > 0
+    assert report["results"][2]["rain_cache_initialization_ms"] >= 0
+    assert all(
+        entry["cached_rain_bytes"] == 0 for entry in report["results"][:2]
+    )
     assert "overall pass=True" in capsys.readouterr().out
 
 

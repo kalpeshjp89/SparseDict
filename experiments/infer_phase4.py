@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=1,
         shuffle=False,
         cache_noise=degradation == "noise",
+        cache_rain=degradation == "rain",
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     records = []

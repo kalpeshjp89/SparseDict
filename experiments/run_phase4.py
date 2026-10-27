@@ -126,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=0,
         pin_memory=device.type == "cuda",
         cache_noise=False,
+        cache_rain=False,
         patch_size=args.patch_size,
     )
     validation_loader = create_micro_dataloader(
@@ -138,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=0,
         pin_memory=device.type == "cuda",
         cache_noise=True,
+        cache_rain=True,
     )
 
     model = MoETopKRestorer(

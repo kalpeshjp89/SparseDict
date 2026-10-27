@@ -36,6 +36,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         rain_strength: float = 0.3,
         patch_size: int | None = None,
         cache_noise: bool = False,
+        cache_rain: bool = False,
     ) -> None:
         self.root = _resolve_image_directory(Path(root))
         self.degradation = degradation
@@ -46,6 +47,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         self.rain_strength = float(rain_strength)
         self.patch_size = None if patch_size is None else int(patch_size)
         self.cache_noise = bool(cache_noise and degradation == "noise")
+        self.cache_rain = bool(cache_rain and degradation == "rain")
         self.epoch = 0
         self.fixed_crop = False
 
@@ -104,6 +106,29 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             if self._noisy_images is not None
             else 0
         )
+        rain_cache_start = time.perf_counter()
+        self._rainy_images = (
+            [
+                _make_rainy_image(
+                    image,
+                    self.rain_strength,
+                    torch.Generator(device="cpu").manual_seed(self.seed + index),
+                )
+                for index, image in enumerate(self._images)
+            ]
+            if self.cache_rain
+            else None
+        )
+        self.rain_cache_initialization_ms = (
+            (time.perf_counter() - rain_cache_start) * 1000
+            if self._rainy_images is not None
+            else 0.0
+        )
+        self.cached_rain_bytes = (
+            sum(image.numel() * image.element_size() for image in self._rainy_images)
+            if self._rainy_images is not None
+            else 0
+        )
 
     def __len__(self) -> int:
         return self.image_count
@@ -132,8 +157,14 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 noisy = self._noisy_images[index][
                     :, top : top + self.patch_size, left : left + self.patch_size
                 ]
+            if self._rainy_images is not None:
+                rainy = self._rainy_images[index][
+                    :, top : top + self.patch_size, left : left + self.patch_size
+                ]
         elif self._noisy_images is not None:
             noisy = self._noisy_images[index]
+        elif self._rainy_images is not None:
+            rainy = self._rainy_images[index]
         clean = clean.to(dtype=torch.float32).div_(255)
 
         if self.degradation == "noise":
@@ -161,9 +192,12 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 antialias=True,
             ).squeeze(0).clamp(0, 1)
         else:
-            corrupted = (
-                clean + self.rain_strength * _make_rain_layer(clean, generator)
-            ).clamp(0, 1)
+            if self._rainy_images is not None:
+                corrupted = rainy.to(dtype=torch.float32)
+            else:
+                corrupted = (
+                    clean + self.rain_strength * _make_rain_layer(clean, generator)
+                ).clamp(0, 1)
 
         return corrupted, clean
 
@@ -180,6 +214,7 @@ def create_micro_dataloader(
     pin_memory: bool = False,
     patch_size: int | None = None,
     cache_noise: bool = False,
+    cache_rain: bool = False,
 ) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
     """Construct a loader; batch size 1 supports variable image dimensions."""
     dataset = DIV2KMicroDataset(
@@ -189,6 +224,7 @@ def create_micro_dataloader(
         seed=seed,
         patch_size=patch_size,
         cache_noise=cache_noise,
+        cache_rain=cache_rain,
     )
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive; got {batch_size}")
@@ -250,6 +286,16 @@ def _make_noisy_image(
     clean = image.to(dtype=torch.float32).div_(255)
     noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
     corrupted = (clean + noise * (noise_sigma_8bit / 255.0)).clamp_(0, 1)
+    return corrupted.to(dtype=torch.float16)
+
+
+def _make_rainy_image(
+    image: torch.Tensor,
+    rain_strength: float,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    clean = image.to(dtype=torch.float32).div_(255)
+    corrupted = (clean + rain_strength * _make_rain_layer(clean, generator)).clamp_(0, 1)
     return corrupted.to(dtype=torch.float16)
 
 

@@ -95,6 +95,23 @@ def test_rain_is_deterministic_and_changes_image(image_directory):
     assert torch.any(rain > clean)
 
 
+def test_cached_rain_is_deterministic_and_uses_compact_storage(image_directory):
+    first = DIV2KMicroDataset(
+        image_directory, "rain", image_count=1, seed=4, cache_rain=True
+    )
+    second = DIV2KMicroDataset(
+        image_directory, "rain", image_count=1, seed=4, cache_rain=True
+    )
+
+    rainy, clean = first[0]
+    cached_rainy, _ = second[0]
+    assert torch.allclose(rainy, cached_rainy, atol=1e-3, rtol=0)
+    assert torch.all((rainy >= 0) & (rainy <= 1))
+    assert first.cached_rain_bytes == 3 * 40 * 32 * 2
+    assert first.rain_cache_initialization_ms >= 0
+    assert torch.any(rainy > clean)
+
+
 def test_loader_yields_corrupted_clean_pairs(image_directory):
     loader = create_micro_dataloader(
         image_directory, "noise", image_count=10, batch_size=1

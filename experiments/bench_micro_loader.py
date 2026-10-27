@@ -42,6 +42,7 @@ def measure_degradation(
         shuffle=False,
         num_workers=0,
         cache_noise=degradation == "noise",
+        cache_rain=degradation == "rain",
     )
     initialization_ms = (time.perf_counter() - start) * 1000
 
@@ -67,7 +68,9 @@ def measure_degradation(
         "noise_cache_initialization_ms": (
             loader.dataset.noise_cache_initialization_ms
         ),
+        "rain_cache_initialization_ms": loader.dataset.rain_cache_initialization_ms,
         "cached_noise_bytes": loader.dataset.cached_noise_bytes,
+        "cached_rain_bytes": loader.dataset.cached_rain_bytes,
         "samples": len(latencies_ms),
         "mean_ms": mean_ms,
         "median_ms": statistics.median(latencies_ms),

@@ -336,14 +336,22 @@ continuation context.
   crops. Full-image benchmark, validation, and noise inference enable this
   cache; patch training retains fresh per-fetch noise without full-image cache
   memory. The benchmark now reports noise-cache initialization time and bytes
-  separately from warmed fetch latency. Focused local tests pass, but generated
-  fixtures cannot establish the real-DIV2K <100 ms result.
+  separately from warmed fetch latency.
 - **Local timing smoke check:** On ten generated 512x512 images using the
   CPU-only host, uncached noise averaged **16.54 ms/pair** and cached noise
   averaged **4.80 ms/pair** after warm-up; the cached tensors used **15 MiB**
   and took **146.75 ms** to precompute. These small synthetic images are not
   representative of the 1644x2040 DIV2K images and do not satisfy the real-data
   acceptance check.
+- **T4 real-DIV2K check after noise caching:** Two benchmark passes measured
+  noise at **75.84 ms** and **74.59 ms** mean, and super-resolution at
+  **81.97 ms** and **80.86 ms** mean. Rain measured **149.07 ms** and
+  **135.57 ms**, so Task 4.1 still failed overall. Since the remaining rain
+  path also generates a full-resolution synthetic layer on every fetch, added
+  compact deterministic rain precomputation for full-image benchmark,
+  validation, and inference; patch training remains dynamic. The benchmark
+  reports rain-cache initialization and storage separately. This rain change
+  still needs a T4 benchmark.
 - **Colab download and smoke check:** After cloning the project, install
   `requirements.txt`, then run
   `python -m scripts.download_div2k --output-dir /content/DIV2K
