@@ -514,28 +514,42 @@ continuation context.
 ### Task 5.3
 
 - **Title:** SRAM Gather-and-Densify Online Softmax Accumulator
-- **Status:** Not started.
+- **Status:** Implemented; CUDA/Triton execution and numerical acceptance remain pending.
 - **Acceptance:** Fuse selected-value aggregation and online softmax; match the
   PyTorch reference within max absolute error `1e-5`.
-- **What works / evidence:** No implementation or verification recorded.
-- **What did not / blockers:** Depends on the fused kernel and compatible
-  hardware/runtime.
-- **Next:** Implement aggregation after Task 5.1/5.2; compare outputs to a
-  PyTorch reference over representative shapes and record max absolute error.
-- **Last updated:** 2026-10-26
+- **What works / evidence:** Added `tiled_topk_aggregate` to
+  `kernels/fused_topk_attn.py`. The Triton stage processes selected logits in
+  32-element blocks, updating the running maximum, softmax denominator, and
+  weighted-value accumulator in float32. Each block gathers only selected
+  value rows and the output is float32. Added CUDA comparisons against a
+  PyTorch reference for float16 and float32 scores/values across representative
+  k, key, query, and feature dimensions; the test enforces maximum absolute
+  error `<=1e-5`.
+- **What did not / blockers:** This host has CPU-only PyTorch and no Triton;
+  GPU compilation and the numerical tolerance have not been verified.
+- **Next:** Run `pytest tests/test_fused_topk_attn.py` on the T4, fix any
+  compatibility or numerical issues, record maximum error, then accept Task 5.3.
+- **Last updated:** 2026-10-27
 
 ### Task 5.4
 
 - **Title:** Latency & Memory Bandwidth Benchmarking
-- **Status:** Not started.
+- **Status:** Benchmark harness implemented; T4 measurements pending.
 - **Acceptance:** Benchmark PyTorch and Triton at `N={1024, 4096, 16384}` and
   show at least 2.5x latency reduction at `N=4096`.
-- **What works / evidence:** No benchmark or measurements recorded.
-- **What did not / blockers:** Depends on a working fused kernel and compatible
-  GPU; no hardware details are recorded.
-- **Next:** Add `tests/bench_kernel.py` with warmup, synchronization, repeated
-  measurements, and environment metadata; record results for each token length.
-- **Last updated:** 2026-10-26
+- **What works / evidence:** Added `tests/bench_kernel.py`, which benchmarks
+  selected-value softmax aggregation against an equivalent PyTorch reference
+  using synchronized CUDA events, warmups, repeated batches, max-error checks,
+  and runtime metadata.
+- **Scope note:** This benchmark isolates Task 5.3 aggregation with precomputed
+  top-k scores and indices. It does not measure end-to-end affinity and
+  selection, so it cannot establish the full fused-kernel speedup target by
+  itself.
+- **What did not / blockers:** T4 timings and task acceptance remain pending.
+- **Next:** Run the aggregation tests and benchmark on T4. Report whether the
+  `N=4096` speedup meets 2.5x; if it does not, retain the result and plan a
+  properly fused end-to-end benchmark rather than claiming acceptance.
+- **Last updated:** 2026-10-27
 
 ## Phase 6: Multi-Task Scaling & Dataset Benchmarking
 

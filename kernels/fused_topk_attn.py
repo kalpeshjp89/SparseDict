@@ -16,6 +16,7 @@ except ImportError:
 QUERY_TILE = 64
 KEY_TILE = 64
 FEATURE_TILE = 32
+SOFTMAX_TILE = 32
 
 
 if triton is not None:
@@ -83,6 +84,78 @@ if triton is not None:
             top_indices + row * K + positions,
             indices.to(tl.int64),
             mask=(row < ROW_COUNT) & (positions < K),
+        )
+
+    @triton.jit
+    def _topk_value_aggregate(
+        top_scores,
+        top_indices,
+        values,
+        output,
+        QUERY_COUNT: tl.constexpr,
+        KEY_COUNT: tl.constexpr,
+        VALUE_DIM: tl.constexpr,
+        SCORE_ROW_STRIDE: tl.constexpr,
+        SCORE_KEY_STRIDE: tl.constexpr,
+        INDEX_ROW_STRIDE: tl.constexpr,
+        INDEX_KEY_STRIDE: tl.constexpr,
+        VALUE_ROW_STRIDE: tl.constexpr,
+        VALUE_FEATURE_STRIDE: tl.constexpr,
+        OUTPUT_ROW_STRIDE: tl.constexpr,
+        OUTPUT_FEATURE_STRIDE: tl.constexpr,
+        SOFTMAX_BLOCK: tl.constexpr,
+        FEATURE_BLOCK: tl.constexpr,
+    ):
+        query = tl.program_id(0)
+        features = tl.program_id(1) * FEATURE_BLOCK + tl.arange(0, FEATURE_BLOCK)
+        key_positions = tl.arange(0, SOFTMAX_BLOCK)
+        running_max = tl.full((), -float("inf"), tl.float32)
+        running_sum = tl.full((), 0.0, tl.float32)
+        accumulator = tl.zeros((FEATURE_BLOCK,), tl.float32)
+
+        for block_start in range(tl.cdiv(KEY_COUNT, SOFTMAX_BLOCK)):
+            positions = block_start * SOFTMAX_BLOCK + key_positions
+            logits = tl.load(
+                top_scores
+                + query * SCORE_ROW_STRIDE
+                + positions * SCORE_KEY_STRIDE,
+                mask=(query < QUERY_COUNT) & (positions < KEY_COUNT),
+                other=-float("inf"),
+            ).to(tl.float32)
+            selected_indices = tl.load(
+                top_indices
+                + query * INDEX_ROW_STRIDE
+                + positions * INDEX_KEY_STRIDE,
+                mask=(query < QUERY_COUNT) & (positions < KEY_COUNT),
+                other=0,
+            ).to(tl.int32)
+
+            block_max = tl.max(logits, axis=0)
+            new_max = tl.maximum(running_max, block_max)
+            old_scale = tl.exp(running_max - new_max)
+            weights = tl.exp(logits - new_max)
+            running_sum = running_sum * old_scale + tl.sum(weights, axis=0)
+
+            selected_values = tl.load(
+                values
+                + selected_indices[:, None] * VALUE_ROW_STRIDE
+                + features[None, :] * VALUE_FEATURE_STRIDE,
+                mask=(query < QUERY_COUNT)
+                & (positions[:, None] < KEY_COUNT)
+                & (features[None, :] < VALUE_DIM),
+                other=0.0,
+            ).to(tl.float32)
+            accumulator = (
+                accumulator * old_scale
+                + tl.sum(weights[:, None] * selected_values, axis=0)
+            )
+            running_max = new_max
+
+        aggregated = accumulator / running_sum
+        tl.store(
+            output + query * OUTPUT_ROW_STRIDE + features * OUTPUT_FEATURE_STRIDE,
+            aggregated,
+            mask=(query < QUERY_COUNT) & (features < VALUE_DIM),
         )
 
     @triton.jit
@@ -248,3 +321,75 @@ def tiled_topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor
         num_warps=4,
     )
     return top_scores, top_indices
+
+
+def tiled_topk_aggregate(
+    top_scores: torch.Tensor,
+    top_indices: torch.Tensor,
+    values: torch.Tensor,
+) -> torch.Tensor:
+    """Softmax-weight gathered value rows for each query's selected top-k.
+
+    The selected score vector is normalized stably in float32; only the chosen
+    value rows are gathered, and the output is accumulated in float32.
+    """
+    if top_scores.ndim != 2 or top_indices.ndim != 2:
+        raise ValueError("top_scores and top_indices must be rank-2 tensors")
+    if values.ndim != 2:
+        raise ValueError("values must be a rank-2 (keys, features) tensor")
+    if top_scores.shape != top_indices.shape:
+        raise ValueError("top_scores and top_indices must have identical shapes")
+    if top_scores.size(0) == 0 or top_scores.size(1) == 0 or values.size(1) == 0:
+        raise ValueError("query, top-k, and value feature dimensions must be non-empty")
+    if values.size(0) == 0:
+        raise ValueError("values must contain at least one key row")
+    if top_scores.device.type != "cuda" or top_indices.device.type != "cuda":
+        raise ValueError("tiled_topk_aggregate requires CUDA tensors")
+    if values.device.type != "cuda":
+        raise ValueError("tiled_topk_aggregate requires CUDA values")
+    if top_scores.device != top_indices.device or top_scores.device != values.device:
+        raise ValueError("scores, indices, and values must be on the same CUDA device")
+    if top_scores.dtype not in (torch.float16, torch.float32):
+        raise ValueError("top_scores must have float16 or float32 dtype")
+    if values.dtype not in (torch.float16, torch.float32):
+        raise ValueError("values must have float16 or float32 dtype")
+    if top_indices.dtype not in (torch.int32, torch.int64):
+        raise ValueError("top_indices must have int32 or int64 dtype")
+    if top_scores.stride(1) != 1 or top_indices.stride(1) != 1:
+        raise ValueError("top-k dimensions must be contiguous")
+    if values.stride(1) != 1:
+        raise ValueError("value feature dimension must be contiguous")
+    if triton is None:
+        raise RuntimeError(
+            "Triton is required for tiled_topk_aggregate; install a "
+            "Triton-enabled PyTorch environment"
+        )
+
+    query_count, key_count = top_scores.shape
+    value_dim = values.size(1)
+    output = torch.empty(
+        (query_count, value_dim), device=values.device, dtype=torch.float32
+    )
+    feature_block = min(32, triton.next_power_of_2(value_dim))
+    grid = (query_count, triton.cdiv(value_dim, feature_block))
+    _topk_value_aggregate[grid](
+        top_scores,
+        top_indices,
+        values,
+        output,
+        query_count,
+        key_count,
+        value_dim,
+        top_scores.stride(0),
+        top_scores.stride(1),
+        top_indices.stride(0),
+        top_indices.stride(1),
+        values.stride(0),
+        values.stride(1),
+        output.stride(0),
+        output.stride(1),
+        SOFTMAX_TILE,
+        feature_block,
+        num_warps=4,
+    )
+    return output

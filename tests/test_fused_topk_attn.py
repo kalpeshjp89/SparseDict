@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from kernels.fused_topk_attn import tiled_affinity, tiled_topk
+from kernels.fused_topk_attn import (
+    tiled_affinity,
+    tiled_topk,
+    tiled_topk_aggregate,
+)
 
 
 def test_tiled_affinity_rejects_non_matrix_inputs():
@@ -52,6 +56,33 @@ def test_tiled_topk_rejects_non_cuda_scores(shape, k):
 def test_tiled_topk_rejects_invalid_inputs(scores, k, message):
     with pytest.raises(ValueError, match=message):
         tiled_topk(scores, k)
+
+
+def test_tiled_topk_aggregate_rejects_incompatible_shapes():
+    with pytest.raises(ValueError, match="identical shapes"):
+        tiled_topk_aggregate(
+            torch.rand(2, 3),
+            torch.zeros(2, 4, dtype=torch.int64),
+            torch.rand(5, 6),
+        )
+
+
+def test_tiled_topk_aggregate_rejects_non_matrix_inputs():
+    with pytest.raises(ValueError, match="rank-2"):
+        tiled_topk_aggregate(
+            torch.rand(2, 3, 4),
+            torch.zeros(2, 3, 4, dtype=torch.int64),
+            torch.rand(5, 6),
+        )
+
+
+def test_tiled_topk_aggregate_requires_cuda():
+    with pytest.raises(ValueError, match="requires CUDA"):
+        tiled_topk_aggregate(
+            torch.rand(2, 3),
+            torch.zeros(2, 3, dtype=torch.int64),
+            torch.rand(5, 6),
+        )
 
 
 @pytest.mark.skipif(
@@ -106,3 +137,53 @@ def test_tiled_topk_matches_torch_topk_indices(row_count, key_count, k, dtype):
     assert actual_indices.shape == (row_count, k)
     assert torch.equal(actual_indices, expected_indices)
     assert torch.equal(actual_scores, expected_scores)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="requires an NVIDIA CUDA runtime for Triton compilation",
+)
+@pytest.mark.parametrize(
+    ("query_count", "key_count", "k", "value_dim"),
+    [
+        (1, 13, 1, 24),
+        (7, 64, 5, 67),
+        (65, 129, 17, 33),
+        (3, 73, 73, 7),
+    ],
+)
+@pytest.mark.parametrize(
+    ("score_dtype", "value_dtype"),
+    [(torch.float16, torch.float16), (torch.float32, torch.float32)],
+)
+def test_tiled_topk_aggregate_matches_torch_reference(
+    query_count, key_count, k, value_dim, score_dtype, value_dtype
+):
+    pytest.importorskip("triton")
+    from kernels.fused_topk_attn import tiled_topk, tiled_topk_aggregate
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        query_count * 10000 + key_count * 100 + k + value_dim
+    )
+    scores = torch.randn(
+        (query_count, key_count),
+        device="cuda",
+        dtype=score_dtype,
+        generator=generator,
+    )
+    values = torch.randn(
+        (key_count, value_dim),
+        device="cuda",
+        dtype=value_dtype,
+        generator=generator,
+    )
+    selected_scores, selected_indices = tiled_topk(scores, k)
+
+    actual = tiled_topk_aggregate(selected_scores, selected_indices, values)
+    weights = torch.softmax(selected_scores.float(), dim=1)
+    selected_values = values.float()[selected_indices]
+    expected = torch.sum(weights.unsqueeze(-1) * selected_values, dim=1)
+
+    assert actual.shape == (query_count, value_dim)
+    assert actual.dtype == torch.float32
+    assert (actual - expected).abs().max().item() <= 1e-5

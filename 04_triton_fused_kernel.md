@@ -69,3 +69,10 @@ $$d_{\text{new}} = d_{\text{old}} \cdot e^{m_{\text{old}} - m_{\text{new}}} + \s
 $$O_{\text{acc}} = O_{\text{acc}} \cdot e^{m_{\text{old}} - m_{\text{new}}} + \text{Softmax}(S_{\text{top}k}) \cdot V[\mathcal{I}_k, :]$$
 
 3. Store normalized output $O_{\text{final}} = \frac{O_{\text{acc}}}{d_{\text{final}}}$ directly to HBM.
+
+The Task 5.3 implementation is exposed as `tiled_topk_aggregate(scores,
+indices, values)`. It processes selected logits in 32-element blocks, updating
+the running maximum, softmax denominator, and weighted-value accumulator in
+float32. Each block gathers only its selected value rows, and the final output
+is stored in float32. This stage consumes selected top-k scores and indices;
+the end-to-end fusion with affinity scoring and selection remains future work.
