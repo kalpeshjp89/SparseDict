@@ -47,6 +47,14 @@ Inside the kernel's inner loop over key blocks:
 3. Execute bitonic sorting network across the $B_c$ score outputs, maintaining a register array of size $k$ storing $(S_{\text{val}}, \text{Index}_{\text{col}})$.
 4. Discard low-scoring elements directly inside registers without HBM writes.
 
+The current Task 5.2 implementation exposes `tiled_topk(scores, k)`. Its
+row-wise Triton bitonic network pads each row to the next power of two, sorts
+score/index pairs in registers, and writes only the requested $k$ results.
+This selector operates on a score matrix produced by an earlier stage; it does
+not yet fuse affinity computation or value aggregation. Equal scores use
+ascending column index as a deterministic tie-breaker, while PyTorch does not
+guarantee the same index ordering for ties.
+
 ---
 
 ## 4. Gather-and-Densify Accumulation Pipeline

@@ -250,7 +250,7 @@ continuation context.
 ### Task 4.1
 
 - **Title:** Micro-Dataset Data Pipeline
-- **Status:** Noise caching is implemented and locally tested; the real-DIV2K benchmark with this optimization is pending, so acceptance remains open.
+- **Status:** Accepted. The optimized loader passed the real-DIV2K T4 benchmark in all three degradation modes.
 - **Relevant files:** `data/micro_loader.py`, `data/__init__.py`,
   `scripts/download_div2k.py`, `experiments/run_phase4.py`,
   `experiments/infer_phase4.py`, `tests/test_micro_loader.py`,
@@ -352,6 +352,13 @@ continuation context.
   validation, and inference; patch training remains dynamic. The benchmark
   reports rain-cache initialization and storage separately. This rain change
   still needs a T4 benchmark.
+- **Latest T4 real-DIV2K benchmark (2026-10-27):** With one warm-up pass and
+  three measured passes over ten images, mean / median / max per-pair fetch
+  times were **73.95 / 70.42 / 116.29 ms** for noise,
+  **79.00 / 76.24 / 106.44 ms** for 4x super-resolution, and
+  **89.05 / 83.25 / 117.87 ms** for rain. All modes passed the `<100 ms`
+  mean-latency criterion and the benchmark reported overall pass; maximum
+  latency is recorded for visibility but is not the acceptance threshold.
 - **Colab download and smoke check:** After cloning the project, install
   `requirements.txt`, then run
   `python -m scripts.download_div2k --output-dir /content/DIV2K
@@ -376,11 +383,9 @@ continuation context.
   alongside the Colab runtime/hardware details. A zero exit status means each
   mode's mean fetch latency is strictly below 100 ms; inspect median/max as
   well before accepting the result.
-- **Next:** Rerun the ten-image Colab loader benchmark against the updated
-  code. Record cache memory and initialization separately; mark Task 4.1 done
-  only if warmed noise mean latency is below 100 ms and all degradation modes
-  remain below threshold.
-- **Last updated:** 2026-10-26
+- **Acceptance result:** All three warmed mean fetch latencies are strictly
+  below 100 ms on the ten-image real-DIV2K T4 benchmark. Task 4.1 is accepted.
+- **Last updated:** 2026-10-27
 
 ### Task 4.2
 
@@ -452,7 +457,7 @@ continuation context.
 ### Task 5.1
 
 - **Title:** Triton Kernel Block-Tile Layout & SRAM Loader
-- **Status:** Tiled affinity scaffold implemented; NVIDIA/Triton compilation and execution remain pending.
+- **Status:** Tiled affinity scaffold compiled, executed, and numerically validated on a Tesla T4.
 - **Acceptance:** Add a fused-kernel module with query/key tiles of 64 and
   coalesced loads; compile without execution crashes. Current scaffold uses a
   two-dimensional query/key launch grid, 64x64 output tiles, 32-feature
@@ -462,28 +467,38 @@ continuation context.
   environments can import the project. CPU tests cover validation; the
   CUDA-vs-PyTorch correctness test is present and skipped when CUDA is
   unavailable. Updated `04_triton_fused_kernel.md` with the launch/tile layout.
-  Full local suite: **79 passed, 1 skipped** (the CUDA-only comparison).
-- **What did not / blockers:** This host has CPU-only PyTorch and no Triton
-  installation, so no Triton compile or NVIDIA execution has been performed.
-  Task 4.1's real-DIV2K benchmark is also pending; do not mark it accepted
-  until the optimized Colab benchmark passes.
-- **Next:** Run the loader benchmark and compile/compare the tiled affinity
-  kernel on the T4 Colab runtime; record Triton/PyTorch/CUDA versions and
-  maximum absolute error before accepting Task 5.1.
+  Full local suite after the loader optimizations: **80 passed, 1 skipped**
+  (the CUDA-only comparison).
+- **Colab T4 validation (2026-10-27):** Compiled and ran the kernel with
+  Triton **3.6.0**, PyTorch **2.11.0+cu130**, CUDA **13.0**, and a Tesla T4.
+  Compared odd-sized inputs `(67, 24)` and `(129, 24)` against PyTorch
+  matrix multiplication for float16 and float32; both returned `(67, 129)`
+  scores with maximum absolute error **0.0**. Both checks passed.
+- **Scope:** This validates the tiled query-key affinity stage only. Top-k
+  selection and value aggregation remain subsequent Phase 5 tasks; this is
+  not yet the complete fused top-k attention kernel.
+- **Next:** Proceed to Task 5.2.
 - **Last updated:** 2026-10-27
 
 ### Task 5.2
 
 - **Title:** In-Register Parallel Bitonic Top-K Selector
-- **Status:** Not started.
+- **Status:** Implemented; local CPU validation passes, while CUDA/Triton execution remains to be verified on Colab.
 - **Acceptance:** Keep top-k values in registers and match `torch.topk` indices
   exactly on the defined test cases.
-- **What works / evidence:** No implementation or verification recorded.
-- **What did not / blockers:** Depends on a compatible Triton development and
-  test environment.
-- **Next:** Implement and unit-test the selector against `torch.topk`,
-  including ties and supported key-tile sizes; record exact comparison results.
-- **Last updated:** 2026-10-26
+- **What works / evidence:** Added `tiled_topk(scores, k)` to
+  `kernels/fused_topk_attn.py`. The Triton selector loads each row into
+  registers, bitonically sorts score/index pairs, and writes only the selected
+  values and indices. Rows are padded to the next power of two; ties have a
+  deterministic ascending-index policy, while PyTorch does not guarantee tie
+  index ordering. CUDA tests assert exact score and index equality against
+  `torch.topk` for float16 and float32 across `(1, 1)`, `(7, 64)`, `(65, 129)`,
+  `(8, 256)`, and `(3, 73)` score matrices, with k from 1 through the full row.
+- **What did not / blockers:** This host has CPU-only PyTorch and no Triton,
+  so CUDA compilation and exact index matching have not yet been executed.
+- **Next:** Run `pytest tests/test_fused_topk_attn.py` on a CUDA/Triton runtime
+  and record the result before accepting Task 5.2.
+- **Last updated:** 2026-10-27
 
 ### Task 5.3
 

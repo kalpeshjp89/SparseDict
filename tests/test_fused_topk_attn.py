@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from kernels.fused_topk_attn import tiled_affinity
+from kernels.fused_topk_attn import tiled_affinity, tiled_topk
 
 
 def test_tiled_affinity_rejects_non_matrix_inputs():
@@ -25,6 +25,35 @@ def test_tiled_affinity_requires_cuda():
         tiled_affinity(torch.rand(2, 4), torch.rand(5, 4))
 
 
+@pytest.mark.parametrize(
+    ("shape", "k"),
+    [
+        ((1, 1), 1),
+        ((7, 64), 5),
+        ((65, 129), 17),
+        ((8, 256), 64),
+        ((3, 73), 73),
+    ],
+)
+def test_tiled_topk_rejects_non_cuda_scores(shape, k):
+    with pytest.raises(ValueError, match="requires CUDA"):
+        tiled_topk(torch.rand(shape), k)
+
+
+@pytest.mark.parametrize(
+    ("scores", "k", "message"),
+    [
+        (torch.rand(2, 3, 4), 2, "rank-2"),
+        (torch.empty(0, 4), 2, "dimensions must be non-empty"),
+        (torch.rand(2, 4), 0, r"k must be an integer"),
+        (torch.rand(2, 4), 5, r"k must be an integer"),
+    ],
+)
+def test_tiled_topk_rejects_invalid_inputs(scores, k, message):
+    with pytest.raises(ValueError, match=message):
+        tiled_topk(scores, k)
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="requires an NVIDIA CUDA runtime for Triton compilation",
@@ -41,3 +70,39 @@ def test_tiled_affinity_matches_torch_on_cuda():
 
     assert actual.shape == (67, 129)
     assert torch.allclose(actual, expected, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="requires an NVIDIA CUDA runtime for Triton compilation",
+)
+@pytest.mark.parametrize(
+    ("row_count", "key_count", "k"),
+    [
+        (1, 1, 1),
+        (7, 64, 5),
+        (65, 129, 17),
+        (8, 256, 64),
+        (3, 73, 73),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_tiled_topk_matches_torch_topk_indices(row_count, key_count, k, dtype):
+    pytest.importorskip("triton")
+    from kernels.fused_topk_attn import tiled_topk
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        row_count * 10000 + key_count * 100 + k
+    )
+    random_values = torch.rand(
+        (row_count, key_count), device="cuda", generator=generator
+    )
+    scores = random_values.argsort(dim=1).argsort(dim=1).to(dtype)
+
+    actual_scores, actual_indices = tiled_topk(scores, k)
+    expected_scores, expected_indices = torch.topk(scores, k, dim=1)
+
+    assert actual_scores.shape == (row_count, k)
+    assert actual_indices.shape == (row_count, k)
+    assert torch.equal(actual_indices, expected_indices)
+    assert torch.equal(actual_scores, expected_scores)
