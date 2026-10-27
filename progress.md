@@ -483,7 +483,7 @@ continuation context.
 ### Task 5.2
 
 - **Title:** In-Register Parallel Bitonic Top-K Selector
-- **Status:** Implemented; local CPU validation passes, while CUDA/Triton execution remains to be verified on Colab.
+- **Status:** Accepted. The bitonic selector passed exact `torch.topk` comparisons on a Tesla T4.
 - **Acceptance:** Keep top-k values in registers and match `torch.topk` indices
   exactly on the defined test cases.
 - **What works / evidence:** Added `tiled_topk(scores, k)` to
@@ -494,10 +494,21 @@ continuation context.
   index ordering. CUDA tests assert exact score and index equality against
   `torch.topk` for float16 and float32 across `(1, 1)`, `(7, 64)`, `(65, 129)`,
   `(8, 256)`, and `(3, 73)` score matrices, with k from 1 through the full row.
-- **What did not / blockers:** This host has CPU-only PyTorch and no Triton,
-  so CUDA compilation and exact index matching have not yet been executed.
-- **Next:** Run `pytest tests/test_fused_topk_attn.py` on a CUDA/Triton runtime
-  and record the result before accepting Task 5.2.
+- **Colab T4 validation (2026-10-27):** Ran the pushed implementation at
+  commit `3d5da10` using Triton **3.6.0**, PyTorch **2.11.0+cu130**, CUDA
+  **13.0**, and a Tesla T4. All ten combinations passed exact score and index
+  equality checks against `torch.topk`: the five documented shapes/k values
+  for each of float16 and float32. The GPU run also compiled the Triton kernel.
+- **Compatibility fix:** Triton 3.6.0 does not expose `tl.isnan`; the comparator
+  now detects NaNs using the IEEE property `x != x`. The corrected code
+  compiled and passed all ten GPU checks.
+- **Local validation:** `python -m pytest tests\test_fused_topk_attn.py -q`
+  passed **13 tests**, with **11 CUDA-dependent cases skipped** on the
+  CPU-only host.
+- **Scope:** This selector reads an existing score matrix and writes top-k
+  values/indices. It does not yet fuse affinity computation or value
+  aggregation.
+- **Next:** Proceed to Task 5.3.
 - **Last updated:** 2026-10-27
 
 ### Task 5.3
