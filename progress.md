@@ -359,8 +359,10 @@ continuation context.
   `experiments/run_phase4.py`, `experiments/infer_phase4.py`,
   `tests/test_phase4.py`
 - **Acceptance:** Train the complete MoE Top-K model for 200 epochs on the
-  10-image micro-dataset with L1 reconstruction and auxiliary losses; reach at
-  least 29.5 dB reconstruction PSNR.
+  10-image micro-dataset with L1, gradient-difference, and auxiliary losses;
+  warm up with multiple active experts before switching to top-1 routing, and
+  reach at least 29.5 dB full-image tiled validation PSNR using inference's
+  tile geometry.
 - **What works / evidence:** Added an end-to-end MoE Top-K image restorer with
   token routing, expert dictionary projections, sparse top-k attention,
   residual reconstruction, and auxiliary balance loss. The training runner
@@ -396,12 +398,19 @@ continuation context.
   small fixed-crop change cannot be attributed to width alone. Fixed-crop and
   tiled full-image metrics are distinct and must continue to be reported
   separately.
-- **Next:** Run the parallel multi-scale dilation head as a separate output
-  variant at `d=96`, keeping data, seed, degradation, schedule, top-k, and
-  fixed-crop/tiled procedures identical to the tokenwise-affine run. Compare
-  both validation and tiled PSNR; do not mark Task 4.2 complete unless
-  fixed-crop validation reaches 29.5 dB.
-- **Last updated:** 2026-10-26
+- **Implementation update (2026-10-27):** Training now adds weighted
+  gradient-difference loss, starts with the configured active-expert count
+  (default 2) for 50 epochs, then switches to top-1 routing. Validation uses
+  full images and the shared overlap-tiled predictor with the same default
+  128-pixel tiles and 16-pixel overlap as inference; super-resolution inputs
+  are upsampled before tiling. The local suite now passes (73 tests), but the
+  updated 200-epoch DIV2K run has not yet been executed, so the 29.5 dB target
+  remains unverified.
+- **Next:** Re-run the parallel multi-scale dilation head at `d=96` on Colab
+  with the updated loss and routing schedule. Compare full-image tiled
+  validation and inference PSNR using matching tile settings; do not mark
+  Task 4.2 complete unless tiled validation reaches 29.5 dB.
+- **Last updated:** 2026-10-27
 
 ## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
 

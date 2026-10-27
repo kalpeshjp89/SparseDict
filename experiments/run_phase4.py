@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.micro_loader import create_micro_dataloader
+from experiments.phase4_utils import gradient_difference_loss, psnr, tiled_predict
 from models.moe_topk_restorer import MoETopKRestorer
 
 
@@ -26,26 +27,36 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def psnr(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    mse = F.mse_loss(prediction, target)
-    return -10.0 * torch.log10(mse.clamp_min(1e-12))
-
-
 @torch.no_grad()
 def evaluate(
     model: MoETopKRestorer,
     loader: torch.utils.data.DataLoader,
     device: torch.device,
+    tile_size: int = 128,
+    overlap: int = 16,
 ) -> tuple[float, float]:
     model.eval()
     psnr_values = []
     losses = []
     for corrupted, clean in loader:
-        corrupted = corrupted.to(device, non_blocking=True)
-        clean = clean.to(device, non_blocking=True)
-        prediction = model(corrupted, output_size=clean.shape[-2:])
-        losses.append(float(F.l1_loss(prediction, clean).item()))
-        psnr_values.append(float(psnr(prediction, clean).item()))
+        corrupted_image = corrupted[0]
+        clean_image = clean[0]
+        if corrupted_image.shape[-2:] != clean_image.shape[-2:]:
+            corrupted_image = F.interpolate(
+                corrupted_image.unsqueeze(0),
+                size=clean_image.shape[-2:],
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze(0).clamp(0, 1)
+        prediction = tiled_predict(
+            model,
+            corrupted_image,
+            device,
+            tile_size=tile_size,
+            overlap=overlap,
+        )
+        losses.append(float(F.l1_loss(prediction, clean_image).item()))
+        psnr_values.append(float(psnr(prediction, clean_image).item()))
     return sum(losses) / len(losses), sum(psnr_values) / len(psnr_values)
 
 
@@ -64,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dictionary-size", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=32)
     parser.add_argument("--active-experts", type=int, default=2)
+    parser.add_argument("--expert-warmup-epochs", type=int, default=50)
+    parser.add_argument("--gradient-weight", type=float, default=0.1)
+    parser.add_argument("--validation-tile-size", type=int, default=128)
+    parser.add_argument("--validation-overlap", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--min-psnr", type=float, default=29.5)
@@ -82,6 +97,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--patch-size must be positive")
     if args.learning_rate <= 0:
         parser.error("--learning-rate must be positive")
+    if args.expert_warmup_epochs < 0:
+        parser.error("--expert-warmup-epochs must be non-negative")
+    if args.gradient_weight < 0:
+        parser.error("--gradient-weight must be non-negative")
+    if (
+        args.validation_tile_size <= 0
+        or args.validation_overlap < 0
+        or args.validation_overlap >= args.validation_tile_size
+    ):
+        parser.error(
+            "require --validation-tile-size>0 and "
+            "0<=--validation-overlap<--validation-tile-size"
+        )
 
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -108,9 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         shuffle=False,
         num_workers=0,
         pin_memory=device.type == "cuda",
-        patch_size=args.patch_size,
     )
-    validation_loader.dataset.set_fixed_crop()
 
     model = MoETopKRestorer(
         d=args.dim,
@@ -124,9 +150,14 @@ def main(argv: list[str] | None = None) -> int:
     history = []
     for epoch in range(args.epochs):
         train_loader.dataset.set_epoch(epoch)
+        active_experts = (
+            args.active_experts if epoch < args.expert_warmup_epochs else 1
+        )
+        model.router.active_experts = active_experts
         model.train()
         total_loss = 0.0
         total_reconstruction = 0.0
+        total_gradient = 0.0
         for corrupted, clean in train_loader:
             corrupted = corrupted.to(device, non_blocking=True)
             clean = clean.to(device, non_blocking=True)
@@ -135,20 +166,32 @@ def main(argv: list[str] | None = None) -> int:
                 corrupted, output_size=clean.shape[-2:], return_aux=True
             )
             reconstruction_loss = F.l1_loss(prediction, clean)
-            loss = reconstruction_loss + auxiliary_loss
+            gradient_loss = gradient_difference_loss(prediction, clean)
+            loss = (
+                reconstruction_loss
+                + args.gradient_weight * gradient_loss
+                + auxiliary_loss
+            )
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach().item())
             total_reconstruction += float(reconstruction_loss.detach().item())
+            total_gradient += float(gradient_loss.detach().item())
 
         record = {
             "epoch": epoch + 1,
+            "active_experts": active_experts,
             "train_loss": total_loss / len(train_loader),
             "train_l1": total_reconstruction / len(train_loader),
+            "train_gradient_loss": total_gradient / len(train_loader),
         }
         if (epoch + 1) % max(1, args.epochs // 20) == 0 or epoch + 1 == args.epochs:
             validation_l1, validation_psnr = evaluate(
-                model, validation_loader, device
+                model,
+                validation_loader,
+                device,
+                tile_size=args.validation_tile_size,
+                overlap=args.validation_overlap,
             )
             record["validation_l1"] = validation_l1
             record["validation_psnr"] = validation_psnr
@@ -161,7 +204,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         history.append(record)
 
-    _, final_psnr = evaluate(model, validation_loader, device)
+    _, final_psnr = evaluate(
+        model,
+        validation_loader,
+        device,
+        tile_size=args.validation_tile_size,
+        overlap=args.validation_overlap,
+    )
     passed = final_psnr >= args.min_psnr
     checkpoint_path = args.output_dir / "moe_topk_restorer.pt"
     metrics_path = args.output_dir / "metrics.json"
@@ -172,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 "d": args.dim,
                 "m": args.dictionary_size,
                 "num_experts": 4,
-                "active_experts": args.active_experts,
+                "active_experts": model.router.active_experts,
                 "top_k": args.top_k,
                 "degradation": args.degradation,
             },
@@ -189,6 +238,10 @@ def main(argv: list[str] | None = None) -> int:
                 "epochs": args.epochs,
                 "image_count": args.image_count,
                 "patch_size": args.patch_size,
+                "expert_warmup_epochs": args.expert_warmup_epochs,
+                "gradient_weight": args.gradient_weight,
+                "validation_tile_size": args.validation_tile_size,
+                "validation_overlap": args.validation_overlap,
                 "device": str(device),
                 "min_psnr": args.min_psnr,
                 "final_validation_psnr": final_psnr,

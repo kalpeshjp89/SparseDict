@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from PIL import Image
 from experiments.infer_phase4 import main as infer_main
 from experiments.infer_phase4 import tiled_predict
 from experiments.run_phase4 import main as train_main
+from experiments.phase4_utils import gradient_difference_loss
 from models.moe_topk_restorer import MoETopKRestorer, ParallelDilatedAffineHead
 
 
@@ -91,6 +93,16 @@ def test_tiled_inference_covers_image_and_preserves_shape():
     assert torch.all((prediction >= 0) & (prediction <= 1))
 
 
+def test_gradient_difference_loss_rewards_matching_edges():
+    target = torch.zeros(1, 3, 4, 4)
+    target[:, :, :, 2:] = 1
+    prediction = target.clone()
+
+    assert gradient_difference_loss(prediction, target).item() == 0
+    prediction[:, :, :, 2:] = 0
+    assert gradient_difference_loss(prediction, target).item() > 0
+
+
 def test_phase4_training_and_checkpoint_inference_smoke(
     tiny_image_directory, tmp_path
 ):
@@ -115,6 +127,12 @@ def test_phase4_training_and_checkpoint_inference_smoke(
             "32",
             "--top-k",
             "8",
+            "--expert-warmup-epochs",
+            "1",
+            "--validation-tile-size",
+            "16",
+            "--validation-overlap",
+            "4",
             "--output-dir",
             str(checkpoint_dir),
             "--min-psnr",
@@ -125,6 +143,16 @@ def test_phase4_training_and_checkpoint_inference_smoke(
     ) == 0
     assert (checkpoint_dir / "moe_topk_restorer.pt").is_file()
     assert (checkpoint_dir / "metrics.json").is_file()
+    metrics = json.loads((checkpoint_dir / "metrics.json").read_text())
+    checkpoint = torch.load(
+        checkpoint_dir / "moe_topk_restorer.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert [record["active_experts"] for record in metrics["history"]] == [2, 1]
+    assert all("train_gradient_loss" in record for record in metrics["history"])
+    assert metrics["validation_tile_size"] == 16
+    assert checkpoint["model_config"]["active_experts"] == 1
 
     assert infer_main(
         [
