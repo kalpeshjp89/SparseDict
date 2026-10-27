@@ -50,8 +50,8 @@ if triton is not None:
                 partner_values = tl.gather(values, partner_positions, axis=0)
                 partner_indices = tl.gather(indices, partner_positions, axis=0)
 
-                value_is_nan = tl.isnan(values)
-                partner_is_nan = tl.isnan(partner_values)
+                value_is_nan = values != values
+                partner_is_nan = partner_values != partner_values
                 both_nan = value_is_nan & partner_is_nan
                 regular_better = (
                     ~value_is_nan
