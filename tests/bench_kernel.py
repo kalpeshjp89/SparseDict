@@ -6,8 +6,12 @@ import argparse
 import json
 import platform
 import statistics
+import sys
+from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kernels.fused_topk_attn import tiled_topk_aggregate
 
