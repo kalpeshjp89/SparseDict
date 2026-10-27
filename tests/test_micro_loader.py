@@ -50,6 +50,42 @@ def test_noise_is_deterministic_for_same_seed_and_image(image_directory):
     assert not torch.equal(first[0][0], first[1][0])
 
 
+def test_cached_noise_is_deterministic_and_uses_compact_storage(image_directory):
+    first = DIV2KMicroDataset(
+        image_directory, "noise", image_count=1, seed=17, cache_noise=True
+    )
+    second = DIV2KMicroDataset(
+        image_directory, "noise", image_count=1, seed=17, cache_noise=True
+    )
+
+    corrupted, clean = first[0]
+    cached_corrupted, _ = second[0]
+    assert torch.allclose(corrupted, cached_corrupted, atol=1e-3, rtol=0)
+    assert torch.all((corrupted >= 0) & (corrupted <= 1))
+    assert first.cached_noise_bytes == 3 * 40 * 32 * 2
+    assert first.noise_cache_initialization_ms >= 0
+    assert torch.mean(torch.abs(corrupted - clean)).item() > 0
+
+
+def test_cached_noise_crop_tracks_clean_crop_across_epochs(image_directory):
+    dataset = DIV2KMicroDataset(
+        image_directory,
+        "noise",
+        image_count=1,
+        patch_size=16,
+        seed=7,
+        cache_noise=True,
+    )
+    first_noisy, first_clean = dataset[0]
+    dataset.set_epoch(1)
+    second_noisy, second_clean = dataset[0]
+
+    assert first_clean.shape == second_clean.shape == (3, 16, 16)
+    assert not torch.equal(first_clean, second_clean)
+    assert first_noisy.shape == second_noisy.shape == first_clean.shape
+    assert not torch.equal(first_noisy, second_noisy)
+
+
 def test_rain_is_deterministic_and_changes_image(image_directory):
     first = DIV2KMicroDataset(image_directory, "rain", seed=4)
     second = DIV2KMicroDataset(image_directory, "rain", seed=4)

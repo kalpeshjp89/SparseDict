@@ -32,8 +32,11 @@ Standard framework implementations materializing $N \times M$ affinity matrices 
 ---
 
 ## 2. Two-Level Tiled Execution Strategy
-- **Logical Blocks:** $B_q = 64$ (Query block length), $B_k = 128$ (Key block length).
-- **Physical Tiles:** $B_r = 32$, $B_c = 32$ matched to NVIDIA Tensor Core instruction tiles ($16 \times 16$ MMA).
+- **Program grid:** Two-dimensional, with one axis for query blocks and one for key blocks: `grid = (ceil_div(N, B_r), ceil_div(M, B_c))`.
+- **Query/key tiles:** $B_r = 64$, $B_c = 64$.
+- **Feature chunk:** Load 32 contiguous features per iteration, masking the final partial chunk.
+- **Coalescing:** Queries and keys are stored with features as the innermost dimension. Threads load adjacent feature values for each row; the key tile is transposed in registers before the dot product.
+- **MMA:** The 64x64 score tile is accumulated in registers and masked on boundary rows/columns.
 
 ---
 

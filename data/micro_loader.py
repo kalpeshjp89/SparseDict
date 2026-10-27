@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -34,6 +35,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         scale_factor: int = 4,
         rain_strength: float = 0.3,
         patch_size: int | None = None,
+        cache_noise: bool = False,
     ) -> None:
         self.root = _resolve_image_directory(Path(root))
         self.degradation = degradation
@@ -43,6 +45,7 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         self.scale_factor = int(scale_factor)
         self.rain_strength = float(rain_strength)
         self.patch_size = None if patch_size is None else int(patch_size)
+        self.cache_noise = bool(cache_noise and degradation == "noise")
         self.epoch = 0
         self.fixed_crop = False
 
@@ -78,6 +81,29 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             )
         self.image_paths = images[: self.image_count]
         self._images = [_load_rgb_tensor(path) for path in self.image_paths]
+        noise_cache_start = time.perf_counter()
+        self._noisy_images = (
+            [
+                _make_noisy_image(
+                    image,
+                    self.noise_sigma_8bit,
+                    torch.Generator(device="cpu").manual_seed(self.seed + index),
+                )
+                for index, image in enumerate(self._images)
+            ]
+            if self.cache_noise
+            else None
+        )
+        self.noise_cache_initialization_ms = (
+            (time.perf_counter() - noise_cache_start) * 1000
+            if self._noisy_images is not None
+            else 0.0
+        )
+        self.cached_noise_bytes = (
+            sum(image.numel() * image.element_size() for image in self._noisy_images)
+            if self._noisy_images is not None
+            else 0
+        )
 
     def __len__(self) -> int:
         return self.image_count
@@ -100,12 +126,24 @@ class DIV2KMicroDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             + index
         )
         if self.patch_size is not None:
-            clean = _random_crop(clean, self.patch_size, generator)
+            top, left = _random_crop_origin(clean, self.patch_size, generator)
+            clean = clean[:, top : top + self.patch_size, left : left + self.patch_size]
+            if self._noisy_images is not None:
+                noisy = self._noisy_images[index][
+                    :, top : top + self.patch_size, left : left + self.patch_size
+                ]
+        elif self._noisy_images is not None:
+            noisy = self._noisy_images[index]
         clean = clean.to(dtype=torch.float32).div_(255)
 
         if self.degradation == "noise":
-            noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
-            corrupted = (clean + noise * (self.noise_sigma_8bit / 255.0)).clamp(0, 1)
+            if self._noisy_images is not None:
+                corrupted = noisy.to(dtype=torch.float32)
+            else:
+                noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
+                corrupted = (
+                    clean + noise * (self.noise_sigma_8bit / 255.0)
+                ).clamp(0, 1)
         elif self.degradation == "super_resolution":
             height, width = clean.shape[-2:]
             low_height = height // self.scale_factor
@@ -141,6 +179,7 @@ def create_micro_dataloader(
     num_workers: int = 0,
     pin_memory: bool = False,
     patch_size: int | None = None,
+    cache_noise: bool = False,
 ) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
     """Construct a loader; batch size 1 supports variable image dimensions."""
     dataset = DIV2KMicroDataset(
@@ -149,6 +188,7 @@ def create_micro_dataloader(
         image_count=image_count,
         seed=seed,
         patch_size=patch_size,
+        cache_noise=cache_noise,
     )
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive; got {batch_size}")
@@ -187,11 +227,11 @@ def _load_rgb_tensor(path: Path) -> torch.Tensor:
     return pixels.view(height, width, 3).permute(2, 0, 1).contiguous()
 
 
-def _random_crop(
+def _random_crop_origin(
     image: torch.Tensor,
     patch_size: int,
     generator: torch.Generator,
-) -> torch.Tensor:
+) -> tuple[int, int]:
     _, height, width = image.shape
     if height < patch_size or width < patch_size:
         raise ValueError(
@@ -199,7 +239,18 @@ def _random_crop(
         )
     top = int(torch.randint(height - patch_size + 1, (), generator=generator).item())
     left = int(torch.randint(width - patch_size + 1, (), generator=generator).item())
-    return image[:, top : top + patch_size, left : left + patch_size]
+    return top, left
+
+
+def _make_noisy_image(
+    image: torch.Tensor,
+    noise_sigma_8bit: float,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    clean = image.to(dtype=torch.float32).div_(255)
+    noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
+    corrupted = (clean + noise * (noise_sigma_8bit / 255.0)).clamp_(0, 1)
+    return corrupted.to(dtype=torch.float16)
 
 
 def _make_rain_layer(

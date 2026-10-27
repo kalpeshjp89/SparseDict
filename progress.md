@@ -250,7 +250,7 @@ continuation context.
 ### Task 4.1
 
 - **Title:** Micro-Dataset Data Pipeline
-- **Status:** Pipeline and decoded-image cache are implemented; the real-data benchmark ran on Colab but did not meet the <100 ms acceptance target.
+- **Status:** Noise caching is implemented and locally tested; the real-DIV2K benchmark with this optimization is pending, so acceptance remains open.
 - **Relevant files:** `data/micro_loader.py`, `data/__init__.py`,
   `scripts/download_div2k.py`, `experiments/run_phase4.py`,
   `experiments/infer_phase4.py`, `tests/test_micro_loader.py`,
@@ -323,6 +323,27 @@ continuation context.
 - **What did not / blockers:** The cached loader has not passed its target;
   noise and rain remain above target and need profiling/optimization. The local
   environment has no DIV2K images for independent performance reproduction.
+- **Latest Colab benchmark (2026-10-27):** Repeated with the updated Phase 4
+  run. Mean / median / max per-pair fetch times were **192.24 / 181.96 /
+  273.13 ms** for noise, **87.23 / 84.06 / 119.35 ms** for super-resolution,
+  and **97.40 / 94.82 / 131.99 ms** for rain. Super-resolution and rain pass
+  the `<100 ms` mean target; noise misses it, so the overall benchmark remains
+  **FAIL**.
+- **Noise optimization (2026-10-27):** Profiling the current loader path shows
+  uncached noise generates a full-resolution CPU `randn` tensor and performs
+  scale/add/clamp on every fetch. Added opt-in per-image noise precomputation
+  in compact float16 storage, with deterministic seeds and spatially aligned
+  crops. Full-image benchmark, validation, and noise inference enable this
+  cache; patch training retains fresh per-fetch noise without full-image cache
+  memory. The benchmark now reports noise-cache initialization time and bytes
+  separately from warmed fetch latency. Focused local tests pass, but generated
+  fixtures cannot establish the real-DIV2K <100 ms result.
+- **Local timing smoke check:** On ten generated 512x512 images using the
+  CPU-only host, uncached noise averaged **16.54 ms/pair** and cached noise
+  averaged **4.80 ms/pair** after warm-up; the cached tensors used **15 MiB**
+  and took **146.75 ms** to precompute. These small synthetic images are not
+  representative of the 1644x2040 DIV2K images and do not satisfy the real-data
+  acceptance check.
 - **Colab download and smoke check:** After cloning the project, install
   `requirements.txt`, then run
   `python -m scripts.download_div2k --output-dir /content/DIV2K
@@ -347,14 +368,16 @@ continuation context.
   alongside the Colab runtime/hardware details. A zero exit status means each
   mode's mean fetch latency is strictly below 100 ms; inspect median/max as
   well before accepting the result.
-- **Next:** Profile noise and rain generation separately from cached image
-  fetch; retain super-resolution as a passing mode for this timing procedure.
+- **Next:** Rerun the ten-image Colab loader benchmark against the updated
+  code. Record cache memory and initialization separately; mark Task 4.1 done
+  only if warmed noise mean latency is below 100 ms and all degradation modes
+  remain below threshold.
 - **Last updated:** 2026-10-26
 
 ### Task 4.2
 
 - **Title:** 10-Image Micro-Overfitting Test
-- **Status:** Training/inference code implemented and locally smoke-tested; the 200-epoch DIV2K noise run and full-image inference completed on Colab, but the 29.5 dB acceptance target was not met.
+- **Status:** The 200-epoch DIV2K noise run on Colab met the 29.5 dB tiled-validation target; result archive export is pending.
 - **Relevant files:** `models/moe_topk_restorer.py`,
   `experiments/run_phase4.py`, `experiments/infer_phase4.py`,
   `tests/test_phase4.py`
@@ -366,32 +389,37 @@ continuation context.
 - **What works / evidence:** Added an end-to-end MoE Top-K image restorer with
   token routing, expert dictionary projections, sparse top-k attention,
   residual reconstruction, and auxiliary balance loss. The training runner
-  samples deterministic per-epoch crops, optimizes L1 plus auxiliary loss,
-  logs fixed-crop validation PSNR, saves metrics and a loadable checkpoint,
-  and reports whether the 29.5 dB criterion passed. The inference runner
+  samples deterministic per-epoch crops, optimizes L1 plus weighted
+  gradient-difference and auxiliary losses, warms up with two active experts
+  before switching to top-1, and validates full images using shared
+  overlap-tiled inference. It saves metrics and a loadable checkpoint and
+  reports whether the 29.5 dB criterion passed. The inference runner
   loads that checkpoint, bicubic-upsamples SR inputs, runs overlap-tiled
   prediction on full images, saves restored PNGs, and writes per-image/mean
   PSNR and latency. Local tests cover forward shapes, gradient flow, two-epoch
   training/checkpoint round-trip, and tiled image output. The complete local
-  suite passed (67 tests), and the Phase 1 runner remains green.
-- **Colab run:** Executed 200 epochs on the ten-image DIV2K subset on a Tesla T4
-  (`torch 2.11.0+cu130`, CUDA available), using noise degradation, `d=96`, and
-  the identity-initialized tokenwise affine head. Fixed-crop validation PSNR
-  was **28.6143 dB**, below the **29.5 dB** target. Tiled full-image inference
-  completed for all ten images; mean full-image PSNR was **29.3415 dB**, also
-  below target by about **0.1585 dB**. The previous run reported 28.6012 dB
-  fixed-crop and 29.3414 dB tiled PSNR, but this iteration changed both model
-  width and the modulation head, so it does not isolate the capacity effect.
-  These evaluation procedures are distinct and should not be conflated.
+  suite passed (73 tests).
+- **Previous Colab baseline:** The earlier 200-epoch noise run using `d=96`
+  and tokenwise affine modulation reached **28.6143 dB** fixed-crop validation
+  and **29.3415 dB** mean tiled inference PSNR, below the target. This is a
+  distinct baseline and is not the result of the updated training procedure.
 - **Preserved artifacts:** The downloaded `C:\Users\Kalpesh\Downloads\s.zip`
   contains the `d=96` tokenwise-affine checkpoint, training metrics, tiled
   restored images and metrics, and `loader_benchmark.json`. It is retained
   locally; its measured results are the baseline for the next comparison.
-- **What did not / blockers:** The experiment completed and produced a
-  checkpoint, but it did not meet the PSNR acceptance criterion. The local
-  environment remains CPU-only and has no DIV2K files. The baseline checkpoint
-  and metrics archive is available locally; the new parallel-head comparison
-  still requires Colab GPU execution.
+- **Latest Colab result (2026-10-27):** The updated 200-epoch noise experiment
+  ran on a Tesla T4. Full-image tiled validation PSNR was **29.511491 dB**
+  (target **29.5 dB**, pass by **0.011491 dB**); mean full-image tiled
+  inference PSNR was **29.511312 dB**. The two measurements differ by only
+  **0.000179 dB**, indicating close evaluation alignment. The result passes,
+  but the margin is narrow and should be treated as a threshold pass for this
+  seed/run, not evidence of robustness across seeds. Download the Colab result
+  archive and retain its checkpoint, `metrics.json`, inference metrics, and
+  loader benchmark JSON for reproducibility.
+- **What did not / blockers:** The dataset loader's 100 ms benchmark still
+  fails overall because noise averages 192.24 ms/pair; super-resolution
+  (87.23 ms) and rain (97.40 ms) pass. This does not invalidate the restoration
+  PSNR result. The local environment remains CPU-only and has no DIV2K files.
 - **Diagnostic hypotheses:** Feature capacity, reconstruction loss, and
   router/top-k settings may constrain reconstruction quality; these are
   unconfirmed hypotheses. The `d=96` run also included an affine head, so its
@@ -403,13 +431,12 @@ continuation context.
   (default 2) for 50 epochs, then switches to top-1 routing. Validation uses
   full images and the shared overlap-tiled predictor with the same default
   128-pixel tiles and 16-pixel overlap as inference; super-resolution inputs
-  are upsampled before tiling. The local suite now passes (73 tests), but the
-  updated 200-epoch DIV2K run has not yet been executed, so the 29.5 dB target
-  remains unverified.
-- **Next:** Re-run the parallel multi-scale dilation head at `d=96` on Colab
-  with the updated loss and routing schedule. Compare full-image tiled
-  validation and inference PSNR using matching tile settings; do not mark
-  Task 4.2 complete unless tiled validation reaches 29.5 dB.
+  are upsampled before tiling. The local suite passed (73 tests), and the
+  updated Colab run met the tiled validation threshold.
+- **Next:** Download and preserve the Colab result archive. Since the PSNR
+  margin is narrow, optionally repeat with additional seeds before claiming
+  robustness. Phase 4.1 noise-loader performance remains a separate
+  optimization task.
 - **Last updated:** 2026-10-27
 
 ## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
@@ -417,17 +444,25 @@ continuation context.
 ### Task 5.1
 
 - **Title:** Triton Kernel Block-Tile Layout & SRAM Loader
-- **Status:** Not started.
+- **Status:** Tiled affinity scaffold implemented; NVIDIA/Triton compilation and execution remain pending.
 - **Acceptance:** Add a fused-kernel module with query/key tiles of 64 and
-  coalesced loads; compile without execution crashes.
-- **What works / evidence:** No implementation or verification recorded.
-- **What did not / blockers:** Triton and compatible GPU availability have not
-  been checked. Phase 5 implementation is gated on Tasks 4.1 and 4.2 meeting
-  their acceptance criteria.
-- **Next:** After both Phase 4 acceptance checks pass, check GPU/Triton
-  availability and the supported toolchain; implement the tile/load structure
-  and record compile validation.
-- **Last updated:** 2026-10-26
+  coalesced loads; compile without execution crashes. Current scaffold uses a
+  two-dimensional query/key launch grid, 64x64 output tiles, 32-feature
+  chunks, and coalesced feature-contiguous loads.
+- **What works / evidence:** Added `kernels/fused_topk_attn.py` with CUDA,
+  shape, and dtype validation and an optional Triton import so CPU-only
+  environments can import the project. CPU tests cover validation; the
+  CUDA-vs-PyTorch correctness test is present and skipped when CUDA is
+  unavailable. Updated `04_triton_fused_kernel.md` with the launch/tile layout.
+  Full local suite: **79 passed, 1 skipped** (the CUDA-only comparison).
+- **What did not / blockers:** This host has CPU-only PyTorch and no Triton
+  installation, so no Triton compile or NVIDIA execution has been performed.
+  Task 4.1's real-DIV2K benchmark is also pending; do not mark it accepted
+  until the optimized Colab benchmark passes.
+- **Next:** Run the loader benchmark and compile/compare the tiled affinity
+  kernel on the T4 Colab runtime; record Triton/PyTorch/CUDA versions and
+  maximum absolute error before accepting Task 5.1.
+- **Last updated:** 2026-10-27
 
 ### Task 5.2
 

@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         image_count=args.image_count,
         batch_size=1,
         shuffle=False,
+        cache_noise=degradation == "noise",
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     records = []

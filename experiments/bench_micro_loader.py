@@ -41,6 +41,7 @@ def measure_degradation(
         batch_size=1,
         shuffle=False,
         num_workers=0,
+        cache_noise=degradation == "noise",
     )
     initialization_ms = (time.perf_counter() - start) * 1000
 
@@ -63,6 +64,10 @@ def measure_degradation(
         "warmup_passes": warmup_passes,
         "repeats": repeats,
         "initialization_ms": initialization_ms,
+        "noise_cache_initialization_ms": (
+            loader.dataset.noise_cache_initialization_ms
+        ),
+        "cached_noise_bytes": loader.dataset.cached_noise_bytes,
         "samples": len(latencies_ms),
         "mean_ms": mean_ms,
         "median_ms": statistics.median(latencies_ms),
