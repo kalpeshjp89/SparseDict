@@ -63,3 +63,12 @@ Keep this file updated as new observations arise.
     true per-token k needs a dedicated gather kernel.
 20. models/__init__.py had duplicate MoETopKRestorer import/__all__ entries
     (dead duplication from earlier edits); rewritten cleanly.
+
+## GPU validation run (Colab T4, 2026-10-28)
+21. Full suite on Tesla T4: 152 passed in 17.16s (torch 2.11.0+cu130,
+    triton 3.6.0, Python 3.13.16, pytest 8.4.2); all 19 CPU-skipped
+    Triton tests executed and passed — Phase-5 reference kernels plus
+    straight-through top-k gradcheck confirmed on CUDA for the first
+    time. Browser-driving friction noted: Colab's "Run all"/"Copy to
+    Drive" buttons resisted synthetic clicks (shadow-DOM refs stale);
+    the commit-then-clone notebook workflow bypassed both.

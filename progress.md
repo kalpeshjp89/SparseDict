@@ -731,11 +731,33 @@ continuation context.
   7.2) depends on dataset/GPU access.
 - **Last updated:** 2026-10-28
 
-> **Pending validation (2026-10-28):** Tasks 6.1-6.4 are implemented and
+> **Pending user validation (2026-10-28):** Tasks 6.1-6.4 are implemented and
 > pass the local CPU suite (133 tests, run twice consecutively), but the
 > user has not yet independently re-run or validated any of the new
-> modules, and no GPU checkpoint has been run against them. Treat all
-> Phase-6 statuses above as "implemented, pending user validation".
+> modules. Treat all Phase-6 statuses above as "implemented, pending user
+> validation".
+
+### GPU Validation Run (Colab T4, 2026-10-28)
+
+- **Status:** PASSED — the full test suite, including all 19 tests that
+  skip on CPU (Triton kernels), executed for real on the T4.
+- **Environment:** Python 3.13.16, torch 2.11.0+cu130, triton 3.6.0,
+  pytest 8.4.2, Tesla T4 (Linux,/content/SparseDict), cloned at
+  commit `6139457` via `experiments/colab_gpu_tests.ipynb`.
+- **Result:** `152 passed in 17.16s` (133 local-passing + 19
+  CPU-skipped = 152 total). Zero failures, zero errors.
+- **Evidence:** full verbose pytest log visible on the Colab
+  page (collected 152 items → 152 passed); nvidia-smi confirmed
+  `Tesla T4` and `cuda available: True` before the run.
+- **Timings baseline:** CPU full suite ~8.8-11.9 s (133 tests);
+  GPU full suite 17.16 s (152 tests, Triton kernels compiled
+  and executed on device).
+- **Note:** the 19 GPU-only tests exercised the Phase-5 Triton
+  tile/sort/aggregate kernels plus straight-through top-k gradcheck
+  on CUDA — they were untested until now. This closes the "Triton
+  path untested" gap for the Phase-5 reference kernels (unrelated
+  to the upcoming Task 5.4b fused kernel, which remains the next
+  implementation item).
 
 ## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
 
