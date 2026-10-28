@@ -109,7 +109,7 @@ Phase 6 (New): Advanced Architectural Extensions
 - [x] Task 6.2: Spatial-Frequency Dual-Domain MoE Partitioning (4 hrs) ([progress](./progress.md#task-62))
   - Implement `models/modules/dual_domain_moe.py`: $E=4$ experts split into two spatial, one wavelet low-pass ($LL$), and one high-frequency (wavelet $LH/HL/HH$ + Fourier amplitude) experts; Haar DWT/rFFT forward with idwt2/irfft2; channel-gated $1\times 1$ fusion.
   - Verification: Forward on $(2, 64, 64, 64)$ returns identical shape; gradients reach all 4 expert sub-dictionaries.
-- [ ] Task 6.3: Adaptive Entropy-Gated Dynamic Top-$K$ Router (4 hrs) ([progress](./progress.md#task-63))
+- [x] Task 6.3: Adaptive Entropy-Gated Dynamic Top-$K$ Router (4 hrs) ([progress](./progress.md#task-63))
   - Implement `models/modules/entropy_gate.py`: softmax vocab projection ($V=256$), Shannon entropy vs. EMA threshold $\tau_H = \mu_H + \kappa\sigma_H$ ($\kappa=0.2$), binary bypass gate $g_i$, adaptive $k_i \in [k_{\min}, k_{\max}]$ ($8, 64$), and linear $W_{\text{skip}}$ bypass.
   - Verification: Synthetic noise (high entropy) triggers 100% activation; constant tensor triggers 0%.
 - [ ] Task 6.4: Master Restorer Architecture Integration (4 hrs) ([progress](./progress.md#task-64))

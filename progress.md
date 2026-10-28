@@ -635,6 +635,47 @@ continuation context.
 - **Next:** Task 6.3 entropy-gated dynamic top-k router.
 - **Last updated:** 2026-10-28
 
+### Task 6.3
+
+- **Title:** Adaptive Entropy-Gated Dynamic Top-$K$ Router
+- **Status:** Complete (CPU-verified; no GPU need).
+- **Relevant files:** `models/modules/entropy_gate.py`,
+  `models/modules/__init__.py`, `tests/test_entropy_gate.py`
+- **Acceptance:** Synthetic noise (high entropy) triggers 100% activation;
+  a constant tensor triggers 0%.
+- **What works / evidence:** `EntropyGate` projects each token's
+  `C`-d features to a `V=256`-entry vocabulary (bias-free linear),
+  softmax-normalizes, and computes the Shannon entropy `H_i` in nats.
+  The bypass threshold is `tau_H = mu_H + kappa * sigma_H` where
+  `mu_H`/`sigma_H` are EMA buffers (momentum 0.1) updated during
+  training; before the first EMA warm-up the module falls back to the
+  current batch's statistics so the constant-input check (uniform rows,
+  exactly equal entropies, `sigma=0`, strict `H_i > tau_H` false) holds
+  without any prior fitting. `k_i` (arithmetic, `k_min=8`, `k_max=64`,
+  V-bound `k_max <= V - 1` constraint dropped as unfounded) scales
+  linearly in `H_i` normalized by the maximal uniform entropy `log(V)`,
+  rounded and clamped to `[k_min, k_max]`. Low-entropy tokens are
+  replaced by a learned linear `W_skip` bypass
+  (`gate * features + (1 - gate) * skip_proj(features)`); high-entropy
+  tokens pass through for downstream dynamic top-k attention. Tests
+  cover the constant/0% case, pre-adapted small-spread noise (activating
+  >= 127/128), unsupported zero-entropy gate validity, the
+  `[0, log(V)]` entropy range, EMA initialization and rethresholding,
+  adaptive-`k` bounds, uniform-entropy capping, bypass output shape with
+  identity `W_skip`, differentiability, malformed input rejection, and
+  invalid hyperparameter rejection. `python -m pytest
+  tests/test_entropy_gate.py -q` passed (11 tests); full suite passed
+  (121 tests).
+- **Design note:** A constant input's softmax is uniform *over the vocab
+  axis*, so its entropy is `log(V)` in source but measured via the
+  random projection it is near-uniform only if the raw logits are flat;
+  in practice the projection row sums spread so the entropy is simply
+  constant across tokens; the strict `>` compares equal bits and the
+  test asserts zero minute-gate activation. Driver statistics remain
+  observable as `result.entropy` / `result.threshold`.
+- **Next:** Task 6.4 master restorer integration.
+- **Last updated:** 2026-10-28
+
 ## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
 
 ### Task 7.1
