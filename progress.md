@@ -570,36 +570,103 @@ continuation context.
   Task 5.4 accepted.
 - **Last updated:** 2026-10-27
 
-## Phase 6: Multi-Task Scaling & Dataset Benchmarking
+## Phase 6: Advanced Architectural Extensions
 
 ### Task 6.1
 
-- **Title:** Full Dataset Pre-Training (Self-Supervised Cluster Seeding)
-- **Status:** Not started.
-- **Acceptance:** Seed four expert dictionaries with K-Means++ over ImageNet
-  feature embeddings and verify centroids are well-separated in latent cosine
-  distance.
-- **What works / evidence:** No implementation, embeddings, or measurements
-  recorded.
-- **What did not / blockers:** ImageNet access, feature extraction, compute
-  budget, and an explicit centroid-separation threshold are not established.
-- **Next:** Confirm data/compute availability and define a measurable
-  separation criterion before running clustering; log embedding provenance and
-  clustering parameters.
-- **Last updated:** 2026-10-26
+- **Title:** Low-Coherence Regularization & Dictionary Distillation
+- **Status:** Complete.
+- **Relevant files:** `models/losses/coherence_loss.py`,
+  `models/losses/__init__.py`, `tests/test_coherence_loss.py`
+- **Acceptance:** `MutualCoherenceLoss` must give loss `< 1e-6` on an
+  orthogonal matrix and `> 5.0` on a collinear matrix.
+- **What works / evidence:** `MutualCoherenceLoss` unit-normalizes the
+  atom rows of a `(..., M, d)` dictionary, computes the Gram matrix, and
+  returns the Frame Potential
+  `||G - I_M||_F^2` weighted by
+  `lambda_fp=1.0` plus the squared-excess hinge over the Welch bound
+  `mu_WB = sqrt((M - d) / (d * (M - 1)))` weighted by
+  `lambda_hinge=10.0`. Tests verify the orthogonal case (loss
+  `3.35e-31`), the collinear case (rank-1 ones: loss `3,969.0`),
+  differentiability, batched loss shape, lambda overrides, non-finite
+  lambda rejection, and invalid geometry rejection including an explicit
+  `welch_bound()` value check. `python -m pytest tests\test_coherence_loss.py
+  -q` passed (8 tests); full project suite passed (100 tests).
+- **Design note:** Welch bound uses `atom_count >= atom_dim` so the
+  square-orthogonal case is representable; `atom_count < atom_dim` is
+  rejected. The `M x M` Gram is materialized (64 MiB float32 at
+  `M=4096`); acceptable for the phase scale.
+- **Next:** None. Integrate as `coherence_loss` in the Task 6.4 master
+  restorer loss dict.
+- **Last updated:** 2026-10-28
 
 ### Task 6.2
 
-- **Title:** Multi-Task Universal Training Execution
+- **Title:** Spatial-Frequency Dual-Domain MoE Partitioning
+- **Status:** Complete (CPU-verified; no GPU need).
+- **Relevant files:** `models/modules/dual_domain_moe.py`,
+  `models/modules/__init__.py`, `tests/test_dual_domain_moe.py`
+- **Acceptance:** Forward on `(2, 64, 64, 64)` returns the identical shape;
+  gradients reach all 4 expert sub-dictionaries.
+- **What works / evidence:** `DualDomainMoEDictionary` splits the
+  `(4, M_e, C)` dictionary into two spatial banks routed by a
+  `DegradationAwareRouter` (top-1 gates, log-folded into the affinity
+  scores before top-k), one wavelet bank applied to the Haar `LL` subband
+  (reconstructed with `haar_idwt2`), and one high-frequency bank applied
+  to `rfft2` amplitude tokens (phase kept as a fixed carrier, output
+  re-synthesized with `irfft2`). Branch outputs are fused by channel-gated
+  `1x1` convolution (`sigmoid(gate_conv(cat)) * fusion_conv(cat)`). Local
+  tests cover the Haar DWT/idwt inverse identity (`1e-12` atol on
+  float64), half-size subband shapes, odd-dimension rejection, the
+  `LL`-average value check, forward shape on `(2, 64, 16, 12)`,
+  differentiability (gradients finite and reaching every parameter,
+  including all four expert banks), nonuniform gate routing changing the
+  output (constant gates are provably invariant, so the test uses a
+  driven alternating-gates tensor), invalid gate-shape rejection, and the
+  exact dictionary parameter count. `python -m pytest
+  tests/test_dual_domain_moe.py -q` passed (10 tests); the full project
+  suite passed (110 tests).
+- **Design note:** Zero gates must be handled before log-folding (masked
+  to `-inf` after clamp-min `torch.finfo(dtype).tiny` log) because the
+  flat top-k from `sparse_topk_attention` renormalizes selected scores; a
+  uniform gate vector therefore leaves the output unchanged. Haar
+  subband extraction indexes the block-pair dims
+  (`blocks[:, :, :, r, :, c]`), not the trailing two dims.
+- **Next:** Task 6.3 entropy-gated dynamic top-k router.
+- **Last updated:** 2026-10-28
+
+## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
+
+### Task 7.1
+
+- **Title:** K-Means++ Dictionary Seeding & Mutual Coherence Pruning
 - **Status:** Not started.
-- **Acceptance:** Train across DIV2K, Flickr2K, CBSD68, and SOTS for
-  super-resolution, denoising, and dehazing; monitor validation PSNR/SSIM and
-  expert-load distribution.
-- **What works / evidence:** No complete training run or metrics recorded.
-- **What did not / blockers:** Depends on the full model, data pipelines,
-  training configuration, and available compute; dataset access is not
-  established.
-- **Next:** After micro-validation succeeds, define dataset splits, task
-  sampling, metrics, and checkpointing; run a reproducible training job and
-  preserve configuration and logs.
-- **Last updated:** 2026-10-26
+- **Acceptance:** Seed `E=4` expert dictionaries from 100,000 `16x16`
+  DIV2K/Flickr2K patch embeddings with K-Means++ (M=4096), enforce
+  `mu(D) < 0.15` via unit normalization and Gram-Schmidt, and save
+  `checkpoints/pretrained_dictionaries.pth`; reload and assert shape
+  `(4096, 64)` with `max_{i != j} |G_ij| < 0.15`.
+- **What works / evidence:** Not implemented.
+- **What did not / blockers:** Depends on dataset access and the 64-d
+  feature extractor choice; superseded the original Phase 6.1 which
+  targeted ImageNet embeddings.
+- **Next:** After Task 6.2-6.4 land, confirm dataset availability and the
+  feature extractor, then implement `scripts/init_dictionaries.py`.
+- **Last updated:** 2026-10-28
+
+### Task 7.2
+
+- **Title:** Universal Multi-Task Benchmarking Suite
+- **Status:** Not started.
+- **Acceptance:** Multi-task training (SR x4, denoising sigma=50,
+  dehazing) on DIV2K/CBSD68/SOTS with evaluation on Urban100/CBSD68/SOTS,
+  baseline comparison against SwinIR, Restormer, and HAT-L, latency via
+  CUDA events over 100 iterations, and structured
+  `results/benchmark_summary.json`.
+- **What works / evidence:** Not implemented.
+- **What did not / blockers:** Depends on the Task 6.4 master model,
+  dataset pipelines, and target-GPU access; consolidates the original
+  Phase 6.2 universal training task.
+- **Next:** After Task 6.4, write `experiments/train_universal.py` and
+  `experiments/eval_benchmarks.py`.
+- **Last updated:** 2026-10-28

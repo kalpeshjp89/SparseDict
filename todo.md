@@ -103,10 +103,10 @@ Phase 5 (Completion): End-to-End Unified Triton Autograd Wrapper
   - Verification: `pytest tests/test_triton_autograd.py` with `torch.autograd.gradcheck` on float64; max analytical gradient error $< 10^{-4}$.
 
 Phase 6 (New): Advanced Architectural Extensions
-- [ ] Task 6.1: Low-Coherence Regularization & Dictionary Distillation (2 hrs) ([progress](./progress.md#task-61))
+- [x] Task 6.1: Low-Coherence Regularization & Dictionary Distillation (2 hrs) ([progress](./progress.md#task-61))
   - Implement `models/losses/coherence_loss.py` with `MutualCoherenceLoss`: Welch bound $\mu_{\text{WB}}$, Frame Potential $\Vert{}G - I_M\Vert{}_F^2$, and hinge loss with $\lambda_{\text{FP}}=1.0$, $\lambda_{\text{hinge}}=10.0$.
   - Verification: Orthogonal matrix gives loss $< 10^{-6}$; collinear matrix gives loss $> 5.0$.
-- [ ] Task 6.2: Spatial-Frequency Dual-Domain MoE Partitioning (4 hrs) ([progress](./progress.md#task-62))
+- [x] Task 6.2: Spatial-Frequency Dual-Domain MoE Partitioning (4 hrs) ([progress](./progress.md#task-62))
   - Implement `models/modules/dual_domain_moe.py`: $E=4$ experts split into two spatial, one wavelet low-pass ($LL$), and one high-frequency (wavelet $LH/HL/HH$ + Fourier amplitude) experts; Haar DWT/rFFT forward with idwt2/irfft2; channel-gated $1\times 1$ fusion.
   - Verification: Forward on $(2, 64, 64, 64)$ returns identical shape; gradients reach all 4 expert sub-dictionaries.
 - [ ] Task 6.3: Adaptive Entropy-Gated Dynamic Top-$K$ Router (4 hrs) ([progress](./progress.md#task-63))
