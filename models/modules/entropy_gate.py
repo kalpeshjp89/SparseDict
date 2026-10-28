@@ -120,12 +120,23 @@ class EntropyGate(nn.Module):
         threshold = None
         if bool(self.entropy_stats_initialized):
             threshold = self.entropy_mean + self.kappa * self.entropy_std
+            gate = (entropy > threshold).to(features.dtype)
         else:
             flat = entropy.detach().flatten()
             batch_mean = flat.mean()
-            batch_std = flat.std(unbiased=False) if flat.numel() > 1 else flat.new_zeros(())
+            batch_std = (
+                flat.std(unbiased=False) if flat.numel() > 1 else flat.new_zeros(())
+            )
             threshold = batch_mean + self.kappa * batch_std
-        gate = (entropy > threshold).to(features.dtype)
+            # Degenerate guard: identical entropies give a mean that can round
+            # up or down by one ulp (making sigma vanishingly small but
+            # nonzero), so the strict comparison is unreliable. A zero-spread
+            # batch carries no routing signal -> all bypassed.
+            spread = flat.max() - flat.min()
+            if float(spread) > 0.0:
+                gate = (entropy > threshold).to(features.dtype)
+            else:
+                gate = torch.zeros_like(entropy, dtype=features.dtype)
 
         normalized = entropy.clamp(max=self.max_entropy) / self.max_entropy
         k = self.k_min + (self.k_max - self.k_min) * normalized

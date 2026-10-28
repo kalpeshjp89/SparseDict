@@ -168,7 +168,9 @@ class DualDomainMoEDictionary(nn.Module):
         result = sparse_topk_attention(scores, flat_values, top_k)
         return result.output
 
-    def forward(self, feature_map: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, feature_map: torch.Tensor, return_gates: bool = False
+    ):
         if feature_map.ndim != 4:
             raise ValueError(
                 f"expected a rank-4 feature map; got {tuple(feature_map.shape)}"
@@ -238,4 +240,7 @@ class DualDomainMoEDictionary(nn.Module):
 
         fusion = torch.cat((sp_map, wave_map, fourier_map), dim=1)
         gate = torch.sigmoid(self.gate_conv(fusion))
-        return self.fusion_conv(fusion) * gate
+        output = self.fusion_conv(fusion) * gate
+        if return_gates:
+            return output, gates
+        return output

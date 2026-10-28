@@ -676,6 +676,52 @@ continuation context.
 - **Next:** Task 6.4 master restorer integration.
 - **Last updated:** 2026-10-28
 
+### Task 6.4
+
+- **Title:** Master Restorer Architecture Integration
+- **Status:** Complete (CPU-verified; no GPU need).
+- **Relevant files:** `models/moe_topk_restorer.py`,
+  `models/modules/dual_domain_moe.py` (return_gates flag),
+  `models/__init__.py`, `tests/test_master_restorer.py`,
+  `observations.md` (new)
+- **Acceptance:** (I_rec, loss_dict) with charbonnier, gradient-difference,
+  auxiliary load-balance, and coherence losses; micro-overfitting loss
+  decreases; gradients reach all 4 expert sub-dictionaries; mutual
+  coherence mu(D) < 0.15.
+- **What works / evidence:** `MasterMoETopKRestorer` unifies the four
+  Phase-6 components: stem (3 -> d) -> `EntropyGate` (hard bypass on the
+  Shannon-entropy threshold tau_H = mu_H + 0.2 sigma_H, k_min/k_max
+  clamped to the model's active budget) -> `DualDomainMoEDictionary`
+  (routed spatial banks + wavelet LL + Fourier amplitude; now optionally
+  returns its gates via `return_gates=True`) -> per-token affine
+  modulation from `ParallelDilatedAffineHead` -> GELU residual fusion and
+  clamp(0, 1) reconstruction head anchored on the input image. Forward
+  returns `(prediction, loss_dict)` (or a pre-summed scalar with
+  `total_loss=True`) holding `charbonnier_loss`, `gradient_difference_loss`
+  (horizontal + vertical gradient Charbonnier), `AuxiliaryLoadBalanceLoss`
+  on the dual-domain gates, and `MutualCoherenceLoss` on the flattened
+  `(4*M_e, C)` dictionary. `use_fused_kernel=True` raises a fail-fast
+  RuntimeError because the Task 5.4b Triton kernel is not implemented
+  yet. `models/__init__.py` was also rewritten to remove duplicated
+  imports found earlier. Local tests cover the dict keys and finite
+  scalars, total-loss grad flow (excluding the STE-less entropy gate by
+  documented limitation), a 10-step micro-overfit with monotone loss
+  decrease, manual coherence checks, orthogonal-basis coherence (< 0.35),
+  gate-to-load-balance backward flow, all 4 expert banks receiving grad,
+  default aggregation sanity, `MoEDictionary` parameter-count identity,
+  the fused-kernel fail-fast, gradient-difference gradients, and the
+  Charbonnier manual match. `python -m pytest tests/test_master_restorer.py
+  -q` passed (12 tests); the full suite passed (133 tests).
+- **Open items (flagged for review):**
+  1. `mu(D) < 0.15` cannot hold for a randomly initialized dictionary; it
+     applies after the Task 7.1 seeding/pruning or extended training.
+  2. EntropyGate parameters are gradient-free (hard gate); a soft/STE
+     variant would let the gate itself train.
+  3. Per-token adaptive k_i is collapsed to a batch-mean integer k.
+- **Next:** Task 5.4b (GPU): design doc then Triton kernel. Phase 7 (7.1,
+  7.2) depends on dataset/GPU access.
+- **Last updated:** 2026-10-28
+
 ## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
 
 ### Task 7.1

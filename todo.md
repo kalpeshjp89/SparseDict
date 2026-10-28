@@ -112,7 +112,7 @@ Phase 6 (New): Advanced Architectural Extensions
 - [x] Task 6.3: Adaptive Entropy-Gated Dynamic Top-$K$ Router (4 hrs) ([progress](./progress.md#task-63))
   - Implement `models/modules/entropy_gate.py`: softmax vocab projection ($V=256$), Shannon entropy vs. EMA threshold $\tau_H = \mu_H + \kappa\sigma_H$ ($\kappa=0.2$), binary bypass gate $g_i$, adaptive $k_i \in [k_{\min}, k_{\max}]$ ($8, 64$), and linear $W_{\text{skip}}$ bypass.
   - Verification: Synthetic noise (high entropy) triggers 100% activation; constant tensor triggers 0%.
-- [ ] Task 6.4: Master Restorer Architecture Integration (4 hrs) ([progress](./progress.md#task-64))
+- [x] Task 6.4: Master Restorer Architecture Integration (4 hrs) ([progress](./progress.md#task-64))
   - Unify parallel dilated affine modulation, dual-domain MoE dictionaries, entropy-gated dynamic top-$K$, and `FusedTopKAttentionFunction` in `models/moe_topk_restorer.py`.
   - Loss return: $(I_{\text{rec}}, \text{loss\_dict})$ with charbonnier, gradient-difference, auxiliary load-balance, and coherence losses.
   - Verification: 10-epoch micro-overfitting on 10 DIV2K images; monotone training loss decrease and mutual coherence $\mu(D) < 0.15$.
