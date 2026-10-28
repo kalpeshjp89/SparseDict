@@ -72,3 +72,9 @@ Keep this file updated as new observations arise.
     time. Browser-driving friction noted: Colab's "Run all"/"Copy to
     Drive" buttons resisted synthetic clicks (shadow-DOM refs stale);
     the commit-then-clone notebook workflow bypassed both.
+22. Split-forward design (F1 fused affinity+topk + F2 existing
+    aggregate) FINALIZED by user review on 2026-10-28: checking
+    progress.md showed the Phase-5 reference kernels were always
+    separate T4-validated stages (5.1/5.2/5.3), so the "one fused
+    forward" phrasing was the assistant's own note (#2), not a spec
+    constraint. Implementation may start against the finalized split.

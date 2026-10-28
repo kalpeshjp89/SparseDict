@@ -759,8 +759,13 @@ continuation context.
   - float64 templating included so `torch.autograd.gradcheck` runs
     per spec (max analytic gradient error < 1e-4).
 - **Open items (flagged for review):**
-  1. Split-forward vs literal single-fused-forward phrasing (design
-     doc §9.5).
+  1. ~~Split-forward vs literal single-fused-forward phrasing~~
+     RESOLVED 2026-10-28 (user decision): progress.md history shows the
+     reference kernels were built as three separately T4-validated
+     stages (5.1 affinity, 5.2 selector, 5.3 aggregate) and Task 5.4
+     already pointed at a unified end-to-end path; the split design
+     unifies those validated stages rather than deviating.
+     Split forward is FINAL.
   2. `B_r = 32` fallback if the `P = 128` padded sorter spills.
 - **Next:** kernel implementation in `kernels/fused_topk_attn.py`
   (F1, B1, B2 + wrapper), then T4 validation through the same

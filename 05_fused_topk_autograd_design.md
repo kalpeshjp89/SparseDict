@@ -7,7 +7,21 @@ document is the plan of record for implementing
 doc-first rule adopted after the rushed-draft failures of Task 5.4b
 preparation (observations.md #2).
 
-Status: DESIGN — awaiting user review. No kernel code has been written yet.
+Status: DESIGN FINALIZED (2026-10-28, user confirmed) — split forward
+(F1 + F2) is the plan of record. Kernel implementation may start.
+
+Decision history: the user asked to check progress against the literal
+"one fused forward" phrasing before finalizing. progress.md shows the
+Phase-5 reference kernels were deliberately built as three separately
+T4-validated stages (5.1 affinity, 5.2 top-k selector, 5.3 aggregate;
+each record noting the other stages "remain subsequent tasks"), and
+Task 5.4's record explicitly points at a unified end-to-end path as
+future work. The split design therefore unifies the validated stages
+rather than deviating from them: F1 adds the only fusion not yet built
+(affinity + running top-k in registers, no dense N x M to HBM), and F2
+reuses the accepted Task 5.3 aggregate kernel unchanged. The literal
+single-kernel variant is possible only for small `d_v <= 32` and is a
+deferred non-goal, not a change of plan.
 
 ---
 
@@ -275,12 +289,13 @@ the standard `skipif not torch.cuda.is_available()` pattern.
 4. **Gather atomic scatter correctness with duplicate keys across
    blocks:** atomic_add is per-element correct; no dedup needed since
    indices are unique within a row.
-5. **Open question for user review:** the split-forward design (F1+F2)
+5. ~~**Open question for user review:** the split-forward design (F1+F2)
    deviates from the literal "one fused forward" phrasing in
-   observations.md #2 but keeps the Spec-04 goal (no dense N x M in
-   HBM). The all-in-one fused variant is feasible only for small
-   `d_v <= 32`; we keep the 2-kernel design as primary and can add a
-   specialized single-kernel variant later if benchmarks justify it.
+   observations.md #2~~ RESOLVED 2026-10-28: user reviewed progress.md
+   history (reference kernels built as separate validated stages 5.1/
+   5.2/5.3; Task 5.4 pointing at a unified end-to-end path) and
+   confirmed the split forward. Single-kernel variant stays a deferred
+   non-goal for small `d_v <= 32`.
 6. **Router-gate fusion hook:** designed as an optional `gate_logits`
    tensor `(B,H,M)` added to tile scores inside F1's GEMM epilogue;
    trivial to add once parity is proven (kept out of 5.4b scope).
