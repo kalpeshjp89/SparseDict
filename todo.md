@@ -94,3 +94,37 @@ Phase 6: Multi-Task Scaling & Dataset Benchmarking
 - [ ] Task 6.2: Multi-Task Universal Training Execution (4 hrs) ([progress](./progress.md#task-62))
   - Train full model on combined dataset (DIV2K, Flickr2K, CBSD68, SOTS) across Super-Resolution, Denoising, and Dehazing tasks.
   - Verification: Monitor validation PSNR/SSIM curves and expert load distribution logs.
+
+Phase 5 (Completion): End-to-End Unified Triton Autograd Wrapper
+- [ ] Task 5.4b: Unified Triton Autograd Wrapper (4 hrs) ([progress](./progress.md#task-54b))
+  - Wrap tiled affinity, register bitonic top-$k$, and online gather-softmax accumulation into `FusedTopKAttentionFunction(torch.autograd.Function)` in `kernels/fused_topk_attn.py`.
+  - Forward: $Q \in \mathbb{R}^{B \times H \times N \times d_k}$, $K \in \mathbb{R}^{B \times H \times M \times d_k}$, $V \in \mathbb{R}^{B \times H \times M \times d_v}$; save log-sum-exp $L$ and top-$k$ indices $\mathbf{I}_{\text{topk}}$.
+  - Backward: recompute local softmax $P_{i,j} = \exp(S_{i,j} - L_i)$ in SRAM; block-sparse $dQ$, $dK$, $dV$ without materializing full $N \times M$ scores.
+  - Verification: `pytest tests/test_triton_autograd.py` with `torch.autograd.gradcheck` on float64; max analytical gradient error $< 10^{-4}$.
+
+Phase 6 (New): Advanced Architectural Extensions
+- [ ] Task 6.1: Low-Coherence Regularization & Dictionary Distillation (2 hrs) ([progress](./progress.md#task-61))
+  - Implement `models/losses/coherence_loss.py` with `MutualCoherenceLoss`: Welch bound $\mu_{\text{WB}}$, Frame Potential $\Vert{}G - I_M\Vert{}_F^2$, and hinge loss with $\lambda_{\text{FP}}=1.0$, $\lambda_{\text{hinge}}=10.0$.
+  - Verification: Orthogonal matrix gives loss $< 10^{-6}$; collinear matrix gives loss $> 5.0$.
+- [ ] Task 6.2: Spatial-Frequency Dual-Domain MoE Partitioning (4 hrs) ([progress](./progress.md#task-62))
+  - Implement `models/modules/dual_domain_moe.py`: $E=4$ experts split into two spatial, one wavelet low-pass ($LL$), and one high-frequency (wavelet $LH/HL/HH$ + Fourier amplitude) experts; Haar DWT/rFFT forward with idwt2/irfft2; channel-gated $1\times 1$ fusion.
+  - Verification: Forward on $(2, 64, 64, 64)$ returns identical shape; gradients reach all 4 expert sub-dictionaries.
+- [ ] Task 6.3: Adaptive Entropy-Gated Dynamic Top-$K$ Router (4 hrs) ([progress](./progress.md#task-63))
+  - Implement `models/modules/entropy_gate.py`: softmax vocab projection ($V=256$), Shannon entropy vs. EMA threshold $\tau_H = \mu_H + \kappa\sigma_H$ ($\kappa=0.2$), binary bypass gate $g_i$, adaptive $k_i \in [k_{\min}, k_{\max}]$ ($8, 64$), and linear $W_{\text{skip}}$ bypass.
+  - Verification: Synthetic noise (high entropy) triggers 100% activation; constant tensor triggers 0%.
+- [ ] Task 6.4: Master Restorer Architecture Integration (4 hrs) ([progress](./progress.md#task-64))
+  - Unify parallel dilated affine modulation, dual-domain MoE dictionaries, entropy-gated dynamic top-$K$, and `FusedTopKAttentionFunction` in `models/moe_topk_restorer.py`.
+  - Loss return: $(I_{\text{rec}}, \text{loss\_dict})$ with charbonnier, gradient-difference, auxiliary load-balance, and coherence losses.
+  - Verification: 10-epoch micro-overfitting on 10 DIV2K images; monotone training loss decrease and mutual coherence $\mu(D) < 0.15$.
+
+Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
+- [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Pruning (4 hrs) ([progress](./progress.md#task-71))
+  - Extract 100,000 $16 \times 16$ patches from DIV2K/Flickr2K; extract 64-d latent features with a pre-trained extractor.
+  - $K$-Means++ clustering to $M = 4096$ centroids; unit normalization and Gram-Schmidt orthogonalization to enforce $\mu(D) < 0.15$.
+  - Save `checkpoints/pretrained_dictionaries.pth`.
+  - Verification: Reload checkpoint; assert shape $(4096, 64)$ and $\max_{i \neq j} \vert{}G_{i,j}\vert{} < 0.15$.
+- [ ] Task 7.2: Universal Multi-Task Benchmarking Suite (4 hrs) ([progress](./progress.md#task-72))
+  - Implement `experiments/train_universal.py` (SR $\times 4$, denoising $\sigma=50$, dehazing on DIV2K, CBSD68, SOTS) and `experiments/eval_benchmarks.py` (Urban100, CBSD68, SOTS test sets).
+  - Compare PSNR/SSIM, FLOP reduction, and latency vs. SwinIR, Restormer, HAT-L baselines; latency via `torch.cuda.Event(enable_timing=True)` over 100 iterations.
+  - Export `results/benchmark_summary.json`.
+  - Verification: Script executes the test suite automatically and produces complete comparison tables matching target metrics.
