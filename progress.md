@@ -737,6 +737,36 @@ continuation context.
 > modules. Treat all Phase-6 statuses above as "implemented, pending user
 > validation".
 
+### Task 5.4b
+
+- **Title:** Unified Triton Autograd Wrapper
+- **Status:** DESIGN PHASE in progress; kernel code NOT yet written.
+  Design document written first per the doc-first rule (observations.md
+  #2): `05_fused_topk_autograd_design.md`.
+- **Design summary:**
+  - Split forward into F1 (new: fused tiled affinity + in-register
+    running top-k merge; writes only `(N, k)` scores + indices — never
+    the dense `N x M`) + F2 (already-validated Task 5.3 aggregate
+    kernel). Chosen over the literal single-kernel reading because
+    holding a `(B_r, d_v)` accumulator plus the `P x log^2 P` sorter
+    exceeds the register budget at master-model shapes; the split still
+    meets the Spec-04 objective of keeping the dense matrix out of HBM.
+  - Backward computes `dQ, dK, dV` exclusively on the saved sparse
+    support from `P_ij = exp(S_ij - L_i)`: B1 kernel gives exact,
+    atomic-free `dQ`; B2 kernel scatters `dK/dV` with atomic adds; the
+    standard softmax delta term uses the forward output re-dotted with
+    `dO`. No dense recompute anywhere — O(Nk) work.
+  - float64 templating included so `torch.autograd.gradcheck` runs
+    per spec (max analytic gradient error < 1e-4).
+- **Open items (flagged for review):**
+  1. Split-forward vs literal single-fused-forward phrasing (design
+     doc §9.5).
+  2. `B_r = 32` fallback if the `P = 128` padded sorter spills.
+- **Next:** kernel implementation in `kernels/fused_topk_attn.py`
+  (F1, B1, B2 + wrapper), then T4 validation through the same
+  commit-then-clone notebook workflow.
+- **Last updated:** 2026-10-28
+
 ### GPU Validation Run (Colab T4, 2026-10-28)
 
 - **Status:** PASSED — the full test suite, including all 19 tests that
