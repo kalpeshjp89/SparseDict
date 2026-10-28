@@ -575,7 +575,9 @@ continuation context.
 ### Task 6.1
 
 - **Title:** Low-Coherence Regularization & Dictionary Distillation
-- **Status:** Complete.
+- **Status:** Implemented and committed earlier; all 8 local tests pass
+  (full suite 100 at the time). User validation / independent run is
+  still pending.
 - **Relevant files:** `models/losses/coherence_loss.py`,
   `models/losses/__init__.py`, `tests/test_coherence_loss.py`
 - **Acceptance:** `MutualCoherenceLoss` must give loss `< 1e-6` on an
@@ -603,7 +605,9 @@ continuation context.
 ### Task 6.2
 
 - **Title:** Spatial-Frequency Dual-Domain MoE Partitioning
-- **Status:** Complete (CPU-verified; no GPU need).
+- **Status:** Implemented; passes the full local CPU suite (110 tests at
+  the time). User validation / independent run of the new module is
+  still pending.
 - **Relevant files:** `models/modules/dual_domain_moe.py`,
   `models/modules/__init__.py`, `tests/test_dual_domain_moe.py`
 - **Acceptance:** Forward on `(2, 64, 64, 64)` returns the identical shape;
@@ -638,7 +642,9 @@ continuation context.
 ### Task 6.3
 
 - **Title:** Adaptive Entropy-Gated Dynamic Top-$K$ Router
-- **Status:** Complete (CPU-verified; no GPU need).
+- **Status:** Implemented; passes the full local CPU suite (121 tests at
+  the time, constant-case flake fixed via the degenerate guard). User
+  validation / independent run of the new gate is still pending.
 - **Relevant files:** `models/modules/entropy_gate.py`,
   `models/modules/__init__.py`, `tests/test_entropy_gate.py`
 - **Acceptance:** Synthetic noise (high entropy) triggers 100% activation;
@@ -679,7 +685,10 @@ continuation context.
 ### Task 6.4
 
 - **Title:** Master Restorer Architecture Integration
-- **Status:** Complete (CPU-verified; no GPU need).
+- **Status:** Implemented; passes the full local CPU suite twice
+  consecutively (133 tests). User validation / independent run of the
+  master model is still pending; GPU checkpoints (Task 5.4b Triton
+  kernel compile/gradcheck, then any Phase-7 scaling) come after that.
 - **Relevant files:** `models/moe_topk_restorer.py`,
   `models/modules/dual_domain_moe.py` (return_gates flag),
   `models/__init__.py`, `tests/test_master_restorer.py`,
@@ -721,6 +730,12 @@ continuation context.
 - **Next:** Task 5.4b (GPU): design doc then Triton kernel. Phase 7 (7.1,
   7.2) depends on dataset/GPU access.
 - **Last updated:** 2026-10-28
+
+> **Pending validation (2026-10-28):** Tasks 6.1-6.4 are implemented and
+> pass the local CPU suite (133 tests, run twice consecutively), but the
+> user has not yet independently re-run or validated any of the new
+> modules, and no GPU checkpoint has been run against them. Treat all
+> Phase-6 statuses above as "implemented, pending user validation".
 
 ## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
 
