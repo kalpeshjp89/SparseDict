@@ -465,7 +465,12 @@ if triton is not None:
 
         for tile in range(0, tl.cdiv(KEY_COUNT, KEY_BLOCK)):
             key_rows = tile * KEY_BLOCK - K + lanes_1d
-            key_valid = (key_rows >= 0) & (key_rows < KEY_COUNT)
+            key_valid = (
+                (lanes_1d >= K)
+                & (lanes_1d < K + KEY_BLOCK)
+                & (key_rows >= 0)
+                & (key_rows < KEY_COUNT)
+            )
             accum = tl.full((QUERY_BLOCK, ARR_LEN), 0.0, DTYPE)
             for chunk in range(0, tl.cdiv(FEATURE_COUNT, FEATURE_BLOCK)):
                 cols = chunk * FEATURE_BLOCK + tl.arange(0, FEATURE_BLOCK)
