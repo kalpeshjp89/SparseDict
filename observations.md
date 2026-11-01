@@ -114,3 +114,62 @@ Keep this file updated as new observations arise.
     per-cell results are read from the notebook DOM (not the model
     API, which does not expose outputs in this Colab version), while
     cell SOURCE edits work through `model.textModel.setValue`.
+
+## Task 5.4 end-to-end benchmark + GPU diagnosis (2026-11-01)
+27. Added `tests/bench_fused_e2e.py` (fused vs dense PyTorch reference with
+    parity gate, CUDA-event medians, peak-memory deltas; saves
+    `results/fused_e2e_benchmark.json`). First T4 run: fused is SLOWER
+    end-to-end (0.18x/0.35x/0.41x at N=1024/4096/16384) but ~80x less
+    memory (3.0 vs 258.5 MiB at N=4096). The 2.5x gate of Task 5.4 is NOT
+    met by the current F1 kernel; recorded honestly, not faked.
+28. Cross-run GPU timing on the T4 is unreliable for absolute numbers
+    (throttling after heavy phases): the same `(32,64)` config measured
+    5.44 ms (bench) vs 15.7-21.3 ms (sweep cells) for identical shapes.
+    Every comparison used to make a decision must be same-cell,
+    interleaved (reference and fused timed in one script one after the
+    other). Per-call timing pattern `elapsed(reps)/reps` is fine but the
+    first-listed config of a sweep inherits a thermal penalty.
+29. F1 bottleneck decomposition (direct kernel timing with
+    `SORT_STAGES=0`): the per-tile bitonic merge costs ~38 us per key
+    tile at the default `(32,64)` config (21 gather passes x ARR=128
+    lanes x 128 tiles, spill-heavy at 4 warps -> 12-17 ms of sort). Best
+    tile config `(16,32)` (ARR=64) shifts the split to ~6.0 affinity +
+    ~4.1 sort = ~10.0 ms. Affinity-only floors by config:
+    `(32,64,w2) 2.57`, `(64,32,w4) 3.37`, `(32,32,w2) 3.31`. No config
+    gets the full kernel below ~8.2 ms; best e2e speedup is 0.55x.
+30. Triton affinity is 3-6x slower than cuBLAS for the same math:
+    torch.matmul on `(1,4096,64) @ (1,64,4096)` (fp32, ieee, writes the
+    full 67 MB score tensor) runs in 0.955 ms, while the clean tiled
+    Triton Phase-A prototype (same dots, + per-tile max only) measures
+    3.36 ms best (`QB32/KB128/FB32/w4/s3`). The fused kernel's masked
+    K-offset lane load scheme and low occupancy (few programs) are
+    suspected; re-tuning may close part of this gap.
+31. torch.topk scales with width: `topk(4096x256)` 0.696 ms vs
+    `topk(4096x4096)` 3.764 ms (5.4x cheaper) - supports a
+    two-stage/threshold-filters-then-small-topk structure. Reference
+    e2e baseline is ~5.5 ms, so the 2.5x gate (fused <= 2.2 ms) requires
+    both a ~1 ms affinity AND a sub-ms selection: neither is evidenced
+    yet on the T4.
+32. Candidate-overflow degenerate data (in particular k=M, where every
+    fresh element exceeds the threshold) cannot be served by a
+    threshold-filtered selector; any such redesign must keep a fallback
+    to the exact running-merge F1 kernel for flagged rows (k=M parity
+    tests would hit this fallback by construction).
+33. Colab output-screening friction during this session: DOM reads only
+    expose the LAST stream lines of a virtualized cell; multi-line
+    result sets must be printed as ONE line (join with "||") or rerun.
+    Triton kernel errors inside notebook cells do NOT appear in
+    `.stream` nodes - read them from the model's outputItems
+    (`it.ename` / `it.evalue` / `it.traceback`). Also per Triton
+    scoping: variables assigned inside a `for` loop are not visible
+    after it unless pre-declared before the loop (hit twice:
+    `NameError('big is not defined')`).
+34. (Pending user decision, Task 5.4.) Four options recorded in
+    progress.md: (a) rescope with honest gap at `(16,32)` + exact
+    threshold-skip of the sort (~1.1-1.5x expected); (b) two-phase
+    redesign of F1 selection with degenerate-row fallback (potential
+    ~1.5-2 ms, needs Phase-A affinity tuning from 3.36 toward ~1 ms);
+    (c) cuBLAS affinity inside the fused path with chunked writes
+    (~3.4-4.4 ms estimated from measured components); (d) keep current
+    F1, deliver the memory win, and revise the acceptance with sign-off.
+    Implementation of the chosen option not started.

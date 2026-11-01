@@ -540,35 +540,109 @@ continuation context.
 ### Task 5.4
 
 - **Title:** Latency & Memory Bandwidth Benchmarking
-- **Status:** Aggregation microbenchmark completed; full fused-pipeline acceptance remains pending.
+- **Status:** Aggregation microbenchmark done (2026-10-27) and end-to-end
+  harness done (2026-11-01); the 2.5x end-to-end acceptance is **NOT met**.
+  GPU diagnosis complete; a decision on the optimization direction is
+  pending with the user.
 - **Acceptance:** Benchmark PyTorch and Triton at `N={1024, 4096, 16384}` and
   show at least 2.5x latency reduction at `N=4096`.
-- **What works / evidence:** Added `tests/bench_kernel.py`, which benchmarks
-  selected-value softmax aggregation against an equivalent PyTorch reference
-  using synchronized CUDA events, warmups, repeated batches, max-error checks,
-  and runtime metadata. On a Tesla T4 (`torch 2.11.0+cu130`, CUDA **13.0**,
-  Triton **3.6.0**, Python **3.13.16**) with `key_count=4096`, `k=32`, and
-  `value_dim=64`, median PyTorch / Triton latency and speedup were:
+- **Memory target:** fused path must avoid materializing the dense `N x M`
+  score matrix.
+- **Part 1 — aggregation microbenchmark (met, 2026-10-27):** `tests/bench_kernel.py`
+  benchmarks selected-value softmax aggregation with synchronized CUDA events,
+  warmups, repeated batches, max-error checks, and runtime metadata. On the
+  Tesla T4 (`torch 2.11.0+cu130`, CUDA 13.0, Triton 3.6.0, Python 3.13.16)
+  with `key_count=4096`, `k=32`, `value_dim=64`:
 
   | N queries | PyTorch (ms) | Triton (ms) | Speedup | Max abs. error |
   |-----------|-------------:|------------:|--------:|---------------:|
   | 1,024     | 0.2500       | 0.0615      | 4.06x   | 2.38e-7        |
   | 4,096     | 0.8906       | 0.2248      | 3.96x   | 4.77e-7        |
   | 16,384    | 3.2457       | 0.7454      | 4.35x   | 4.77e-7        |
+- **Part 2 — end-to-end fused vs PyTorch (NOT met, 2026-11-01):** added
+  `tests/bench_fused_e2e.py` (parity-checked fused vs the dense PyTorch
+  reference `q @ K^T` + `sparse_topk_attention`, CUDA-event medians, peak
+  memory deltas; results saved to `results/fused_e2e_benchmark.json`).
+  T4 results at `M=4096, k=32, D=64`:
 
-  Timings used five warmups and the median of three CUDA-event batches with
-  twenty repetitions each. The `N=4096` aggregation microbenchmark exceeds
-  the 2.5x target.
-- **Scope note:** This benchmark isolates Task 5.3 aggregation with precomputed
-  top-k scores and indices. It does not measure end-to-end affinity and
-  selection, so it cannot establish the full fused-kernel speedup target by
-  itself. The current benchmark reports the aggregation stage only.
-- **What did not / blockers:** End-to-end fused affinity, top-k selection, and
-  value aggregation are not yet one kernel; full-pipeline latency and memory
-  bandwidth reduction remain unmeasured.
-- **Next:** Implement and benchmark the fused end-to-end path before marking
-  Task 5.4 accepted.
-- **Last updated:** 2026-10-27
+  | N queries | PyTorch (ms) | Fused (ms) | Speedup | Ref MiB | Fused MiB |
+  |-----------|-------------:|-----------:|--------:|--------:|----------:|
+  | 1,024     | 11.85        | 2.13       | 0.18x   | 64.6    | 0.8       |
+  | 4,096     | 15.67        | 5.44       | 0.35x   | 258.5   | 3.0       |
+  | 16,384    | 52.74        | 21.38      | 0.41x   | 1034.0  | 12.1      |
+
+  NOTE: the first `runAll`-dispatched bench printed the columns with the
+  reference and fused medians swapped relative to a later same-cell
+  re-measure; the same-cell re-measures below (reference ~5.5 ms at
+  `N=4096`) are the trustworthy baseline. Parity held (max abs.
+  error <= 1e-5) throughout. The fused path wins on memory by ~80x but
+  loses on latency; the 2.5x speed target cannot be met by the current
+  F1 kernel.
+- **Diagnosis (GPU micro-observations, 2026-11-01) — all same-cell,
+  apples-to-apples at `N=4096, M=4096, k=32, D=64`:**
+  1. Reference end-to-end baseline ~5.5 ms in every run; 2.5x therefore
+     requires fused <= ~2.2 ms.
+  2. Tile-parameter sweep inside F1 (`(QB, KB)` tuples, monkeypatched,
+     parity-checked): `(32,64) 21.3 ms -> (16,64) 15.5 -> (16,32) 9.9`
+     (post-throttle re-measure: `(32,64) 15.7 -> (16,32) 10.0 -> (16,16)
+     19.5`). Smaller tiles win because `ARR_LEN = next_pow2(K + KB)`
+     shrinks the per-tile bitonic sorter (`128 -> 64 lanes`) and halves
+     per-program register pressure. `(16,32)` is the best config found:
+     10.0 ms fused = 0.55x vs the reference.
+  3. Direct F1 kernel decomposition (time the kernel with
+     `SORT_STAGES=0` to isolate affinity): affinity-only floor 2.6-6.0 ms
+     depending on `(QB, KB, num_warps)`; sort adds the rest. Best splits:
+     `(32,64,w2)`: affinity 2.57 + sort 17.4; `(16,32,w4)`: 5.97 + 4.13;
+     `(64,32,w4)`: 3.37 + 4.83 (best full, ~8.2 ms). The per-tile bitonic
+     (`21 gather-passes x 128 tiles x ARR lanes`) is ~38 us/tile — the
+     structural bottleneck — and affinity itself is far below the T4's
+     achievable bandwidth/compute rates (~50 GB/s effective).
+  4. Small `QB < 16` is a dead end: `USE_DOT >= 16` gating forces the
+     elementwise broadcast path; measured affinity-only 17-23 ms.
+  5. Reference microbenchmarks: cuBLAS full `QK^T` matmul (which writes
+     67 MB scores) = 0.955 ms; `torch.topk` on `(4096, 256)` = 0.696 ms
+     vs `torch.topk` on `(4096, 4096)` = 3.764 ms. Iterative
+     `tl.max`+`tl.argmax` (what a reduction-based selection would pay
+     per pass) costs ~2 gather-passes.
+- **Why the 2.5x target is structurally out of reach for the current F1design:**
+  the F1 design re-sorts the whole running candidate array once per key
+  tile (128 x 21 bitonic passes per program), and its affinity loop is
+  measured at ~13x the theoretical compute floor. No `(QB, KB, warps)`
+  combination found gets the full kernel below ~8 ms. Honest gap: best
+  0.55x vs the 2.5x target.
+- **Candidate optimization directions identified (pending user decision):**
+  - (a) Modest rescope: adopt the best config `(16,32)` (+ threshold-skip
+    of the sort: exact, helps structured/real data, ~no effect on uniform
+    random), record measured speeds (expect ~1.1-1.5x e2e), and revise the
+    acceptance to document the honest gap.
+  - (b) Two-phase redesign of F1's selection (keep F2 and the validated
+    B1/B2 backward unchanged): Phase A = clean tiled `tl.dot` affinity +
+    per-tile max only (`N x T` scratch, no candidate buffer, no gathers);
+    between phases, per-row threshold = 32nd-largest tile max
+    (mathematically a valid lower bound of the true v32, so no top-k
+    element can be missed); Phase B = recompute affinity only for visited
+    tiles, keep `{acc >= threshold}` candidates (~35/row on uniform data),
+    one small final per-row sort; degenerate rows (candidate overflow,
+    incl. k=M) fall back to the existing exact F1 kernel. Potential path
+    to ~1.5-2 ms if Phase A lands near the compute/bandwidth floor, but
+    the Phase-A prototype measured 3.36 ms best
+    (`QB32/KB128/FB32/w4/s3`) — well short of cuBLAS's 0.955 ms for the
+    same math, so (b) needs further affinity tuning before it can be
+    promised.
+  - (c) Use cuBLAS for the affinity within the fused path (chunked writes
+    to keep memory bounded) plus Triton chunk-local top-k + small final
+    selection; estimated ~3.4-4.4 ms from measured component timings —
+    still short of 2.5x, likely ~1.3-1.6x.
+  - (d) Keep the current F1 as the long-N design, document the measured
+    results and the memory win (3.0 MiB vs 258.5 MiB at N=4096) as the
+    deliverable, and revise acceptance criteria with user sign-off.
+- **What works / evidence:** everything recorded above; 170 CUDA tests
+  passing at commit `36331e4` (Task 5.4b remains fully green; no
+  regression).
+- **Next:** user review of the four options; then implement the chosen
+  path, re-benchmark all three N values, and only then re-evaluate the
+  2.5x gate (never faked).
+- **Last updated:** 2026-11-01
 
 ## Phase 6: Advanced Architectural Extensions
 
