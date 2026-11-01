@@ -740,7 +740,9 @@ continuation context.
 ### Task 5.4b
 
 - **Title:** Unified Triton Autograd Wrapper
-- **Status:** DESIGN PHASE in progress; kernel code NOT yet written.
+- **Status:** IMPLEMENTED + T4-VALIDATED (2026-11-01). Kernel code in
+  `kernels/fused_topk_attn.py`; tests in
+  `tests/test_triton_autograd.py` (design §8 validation plan).
   Design document written first per the doc-first rule (observations.md
   #2): `05_fused_topk_autograd_design.md`.
 - **Design summary:**
@@ -767,10 +769,36 @@ continuation context.
      unifies those validated stages rather than deviating.
      Split forward is FINAL.
   2. `B_r = 32` fallback if the `P = 128` padded sorter spills.
-- **Next:** kernel implementation in `kernels/fused_topk_attn.py`
-  (F1, B1, B2 + wrapper), then T4 validation through the same
-  commit-then-clone notebook workflow.
-- **Last updated:** 2026-10-28
+- **Next:** Task 5.4 benchmarking — the fused path is now the end-to-end
+  candidate to benchmark against the reference path (fused vs
+  sparse_topk_attention latency/memory at N=4096). Design §8 step 7
+  (micro-benchmark `(B=2,H=4,N=4096,M=256,k=16)` with timing + peak
+  memory) is the natural first measurement.
+- **Last updated:** 2026-11-01
+
+### GPU Validation Run — Task 5.4b (Colab T4, 2026-10-29 → 2026-11-01)
+
+- **Status:** PASSED — full suite on Tesla T4: **170 passed in 7.88s**
+  (torch 2.11.0+cu130, triton 3.6.0), cloned at `36331e4`.
+- **Iteration history:** run 1 exposed an illegal memory access (12
+  fails; F1/B1/B2 launches passed `top_scores.stride(2)` instead of
+  `top_indices.stride(1)`) → run 2 exposed a Triton compile error
+  (3 fails; `_backward_dkv` body referenced undeclared
+  QUERY_BH_STRIDE/QUERY_ROW_STRIDE) → run 3 all green. See
+  observations.md #23-#25 for the debugging lessons.
+- **5.4b validation plan coverage (design §8):** compile smoke
+  (N=512, M=256, k=16, fp32) ✓; forward parity vs
+  `sparse_topk_attention` on all five grids `(N,M,k,d_v)` incl. k=M
+  degenerate case and `(4096,256,16,64)` ✓ (max abs err ≤ 1e-5);
+  fp64 forward parity ≤ 1e-9 ✓; `torch.autograd.gradcheck` fp64 on
+  `(8,12,5,4,3)` and `(16,32,8,8,8)` with nondet_tol for B2 atomics ✓;
+  analytical backward vs autograd-of-reference on fp64
+  `(2,3,32,24,7,8,6)` < 1e-4 gate ✓; padded-candidate zero-mass edge ✓.
+- **Evidence:** clone cell printed `fresh clone at HEAD 36331e4`;
+  nvidia-smi/cell-1 output confirmed `Tesla T4`,
+  `cuda available: True`; pytest summary `170 passed in 7.88s`.
+- **CPU suite in the same run:** 139 local tests pass unchanged
+  (pure-CPU tests unaffected by the kernel work).
 
 ### GPU Validation Run (Colab T4, 2026-10-28)
 

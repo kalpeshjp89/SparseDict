@@ -96,7 +96,7 @@ Phase 6: Multi-Task Scaling & Dataset Benchmarking
   - Verification: Monitor validation PSNR/SSIM curves and expert load distribution logs.
 
 Phase 5 (Completion): End-to-End Unified Triton Autograd Wrapper
-- [ ] Task 5.4b: Unified Triton Autograd Wrapper (4 hrs) ([progress](./progress.md#task-54b))
+- [X] Task 5.4b: Unified Triton Autograd Wrapper (4 hrs) ([progress](./progress.md#task-54b))
   - [X] Design document written first: `05_fused_topk_autograd_design.md` (split-forward F1+F2 design; sparse-support-only backward).
   - Wrap tiled affinity, register bitonic top-$k$, and online gather-softmax accumulation into `FusedTopKAttentionFunction(torch.autograd.Function)` in `kernels/fused_topk_attn.py`.
   - Forward: $Q \in \mathbb{R}^{B \times H \times N \times d_k}$, $K \in \mathbb{R}^{B \times H \times M \times d_k}$, $V \in \mathbb{R}^{B \times H \times M \times d_v}$; save log-sum-exp $L$ and top-$k$ indices $\mathbf{I}_{\text{topk}}$.

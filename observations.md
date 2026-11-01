@@ -78,3 +78,39 @@ Keep this file updated as new observations arise.
     separate T4-validated stages (5.1/5.2/5.3), so the "one fused
     forward" phrasing was the assistant's own note (#2), not a spec
     constraint. Implementation may start against the finalized split.
+
+## Fused autograd kernel T4 debugging (2026-10-29, 2026-11-01)
+23. First T4 run of the 5.4b fused autograd tests: 12 failed /
+    158 passed - a single cudaErrorIllegalAddress in the F1 launch
+    poisoned the CUDA context so every later CUDA test failed with the
+    same error. Root cause: the F1/B1/B2 launches passed
+    `top_scores.stride(2)` where kernel signatures expect the ROW
+    stride of `top_indices` (i.e. `top_indices.stride(1)`), so index
+    rows collapsed onto each other and torch.empty garbage indices
+    drove OOB gathers. Lesson: audit every kernel launch argument
+    positionally against the signature before first CUDA run; a
+    poisoned context masks all later failures as duplicates of the
+    first.
+24. Second T4 run after stride fixes: 167 passed / 3 failed - the three
+    failing fp64 backward tests crashed the Triton COMPILER (not the
+    context): `_backward_dkv`'s body referenced
+    QUERY_BH_STRIDE / QUERY_ROW_STRIDE which its signature never
+    declared, while the hand-written launch 'matched' the broken
+    signature. Lesson: compile-coverage must include the DTYPE axis; a
+    kernel that compiles in fp32 can still fail in fp64-only paths
+    (gradcheck is the first fp64 consumer).
+25. Third T4 run (commit 36331e4): 170 passed in 7.88s on Tesla T4
+    (torch 2.11.0+cu130, triton 3.6.0) - the fused 5.4b forward parity
+    (5 grids incl. k=M and N=4096), fp64 parity, double gradcheck
+    shapes, analytical-vs-reference backward (max err < 1e-4 gate),
+    padded-lane zero-mass and k=M edge cases all pass on-device. Local
+    suite stays 139 passed / 31 skipped.
+26. Colab session resume notes: re-opening the notebook after the
+    Google sign-in cookie expired redirected the tab to
+    accounts.google.com; navigating directly to the notebook URL after
+    sign-in restores the editable copy with runtime type (T4) intact.
+    Runtime connect + Run all can be driven headlessly via
+    `colab.global.notebook.connectToKernel()` / `runAll()`;
+    per-cell results are read from the notebook DOM (not the model
+    API, which does not expose outputs in this Colab version), while
+    cell SOURCE edits work through `model.textModel.setValue`.
