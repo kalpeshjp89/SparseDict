@@ -19,8 +19,8 @@ FEATURE_TILE = 32
 SOFTMAX_TILE = 32
 
 # Task 5.4b tiles for the fused program-per-query-block kernels.
-FUSED_QUERY_BLOCK = 32
-FUSED_BACKWARD_QUERY_BLOCK = 16
+FUSED_QUERY_BLOCK = 64
+FUSED_BACKWARD_QUERY_BLOCK = 64
 FUSED_KEY_BLOCK = 64
 FUSED_FEATURE_BLOCK = 32
 FUSED_KCHUNK = 16
@@ -561,13 +561,57 @@ if triton is not None:
         )
 
     @triton.jit
+    def _recompute_selected_scores(
+        queries,
+        keys,
+        indices,
+        rows,
+        row_mask,
+        key_mask,
+        bh,
+        QUERY_COUNT: tl.constexpr,
+        FEAT_Q: tl.constexpr,
+        QUERY_BH_STRIDE: tl.constexpr,
+        QUERY_ROW_STRIDE: tl.constexpr,
+        KEY_BH_STRIDE: tl.constexpr,
+        KEY_ROW_STRIDE: tl.constexpr,
+        QUERY_BLOCK: tl.constexpr,
+        KCHUNK: tl.constexpr,
+        FEATURE_BLOCK: tl.constexpr,
+        SCORE_SCALE: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ):
+        scores = tl.full((QUERY_BLOCK, KCHUNK), 0.0, DTYPE)
+        for feature_chunk in range(0, tl.cdiv(FEAT_Q, FEATURE_BLOCK)):
+            features = feature_chunk * FEATURE_BLOCK + tl.arange(0, FEATURE_BLOCK)
+            feature_mask = features < FEAT_Q
+            query_tile = tl.load(
+                queries
+                + bh * QUERY_BH_STRIDE
+                + rows[:, None] * QUERY_ROW_STRIDE
+                + features[None, :],
+                mask=row_mask[:, None] & feature_mask[None, :],
+                other=0.0,
+            ).to(DTYPE)
+            selected_keys = tl.load(
+                keys
+                + bh * KEY_BH_STRIDE
+                + indices[:, :, None] * KEY_ROW_STRIDE
+                + features[None, None, :],
+                mask=row_mask[:, None, None]
+                & key_mask[:, :, None]
+                & feature_mask[None, None, :],
+                other=0.0,
+            ).to(DTYPE)
+            scores += tl.sum(query_tile[:, None, :] * selected_keys, axis=2)
+        return scores * SCORE_SCALE
+
+    @triton.jit
     def _backward_dq(
         queries,
         keys,
         values,
         grad_out,
-        saved_out,
-        top_scores,
         top_indices,
         lse,
         d_scores,
@@ -584,9 +628,6 @@ if triton is not None:
         VALUE_ROW_STRIDE: tl.constexpr,
         GO_BH_STRIDE: tl.constexpr,
         GO_ROW_STRIDE: tl.constexpr,
-        OUT_BH_STRIDE: tl.constexpr,
-        OUT_ROW_STRIDE: tl.constexpr,
-        TS_ROW_STRIDE: tl.constexpr,
         TI_ROW_STRIDE: tl.constexpr,
         DS_ROW_STRIDE: tl.constexpr,
         DQ_ROW_STRIDE: tl.constexpr,
@@ -595,18 +636,15 @@ if triton is not None:
         KCHUNK: tl.constexpr,
         QUERY_BLOCK: tl.constexpr,
         FEATURE_BLOCK: tl.constexpr,
+        SCORE_SCALE: tl.constexpr,
         DTYPE: tl.constexpr,
     ):
         """Backward B1: exact, atomic-free ``dQ`` plus the ``dS (N, K)`` scratch.
 
-        Recomputes ``P = exp(S - L)`` on the saved sparse support, builds
-        ``G = dO . V`` per selected pair, and writes
-        ``dS = P * (G - delta)`` with ``delta_i = dot(dO_i, O_i)``. The
-        ``dS`` scratch feeds kernel B2 (which loads it in a separate
-        launch, so no same-program store/load hazard exists). ``dQ``
-        recomputes ``dS`` inline per k-chunk (never re-loading the scratch
-        within this program) and gathers ``K[I_s]`` rows over feature
-        chunks — no dense reads or writes anywhere.
+        Recomputes selected affinities and ``P = exp(S - L)`` from the saved
+        indices and inputs. It accumulates ``delta_i = sum_j P_ij * (dO_i . V_j)``
+        before writing the sparse ``dS (N, K)`` scratch. No forward scores or
+        output are retained for backward.
         """
         rows = tl.program_id(0) * QUERY_BLOCK + tl.arange(0, QUERY_BLOCK)
         row_mask = rows < QUERY_COUNT
@@ -614,40 +652,89 @@ if triton is not None:
         out_rows = bh * QUERY_COUNT + rows
 
         delta = tl.full((QUERY_BLOCK,), 0.0, DTYPE)
-        for chunk in range(0, tl.cdiv(FEAT_V, FEATURE_BLOCK)):
-            vcols = chunk * FEATURE_BLOCK + tl.arange(0, FEATURE_BLOCK)
-            vcols_valid = vcols < FEAT_V
-            do_tile = tl.load(
-                grad_out
-                + bh * GO_BH_STRIDE
-                + rows[:, None] * GO_ROW_STRIDE
-                + vcols[None, :],
-                mask=row_mask[:, None] & vcols_valid[None, :],
-                other=0.0,
-            ).to(DTYPE)
-            out_tile = tl.load(
-                saved_out
-                + bh * OUT_BH_STRIDE
-                + rows[:, None] * OUT_ROW_STRIDE
-                + vcols[None, :],
-                mask=row_mask[:, None] & vcols_valid[None, :],
-                other=0.0,
-            ).to(DTYPE)
-            delta += tl.sum(do_tile * out_tile, axis=1)
-
-        for kc in range(0, tl.cdiv(K, KCHUNK)):
+        for kc in range(0, tl.cdiv(KP, KCHUNK)):
             kcols = kc * KCHUNK + tl.arange(0, KCHUNK)
             kmask = kcols < K
-            scores = tl.load(
-                top_scores + out_rows[:, None] * TS_ROW_STRIDE + kcols[None, :],
-                mask=row_mask[:, None] & kmask[None, :],
-                other=-float("inf"),
-            ).to(DTYPE)
             indices = tl.load(
                 top_indices + out_rows[:, None] * TI_ROW_STRIDE + kcols[None, :],
                 mask=row_mask[:, None] & kmask[None, :],
                 other=0,
             ).to(tl.int32)
+            scores = _recompute_selected_scores(
+                queries,
+                keys,
+                indices,
+                rows,
+                row_mask,
+                kmask[None, :],
+                bh,
+                QUERY_COUNT,
+                FEAT_Q,
+                QUERY_BH_STRIDE,
+                QUERY_ROW_STRIDE,
+                KEY_BH_STRIDE,
+                KEY_ROW_STRIDE,
+                QUERY_BLOCK,
+                KCHUNK,
+                FEATURE_BLOCK,
+                SCORE_SCALE,
+                DTYPE,
+            )
+            lse_vals = tl.load(lse + out_rows, mask=row_mask, other=0.0).to(DTYPE)
+            probs = tl.exp(scores - lse_vals[:, None])
+            g_vals = tl.full((QUERY_BLOCK, KCHUNK), 0.0, DTYPE)
+            for vchunk in range(0, tl.cdiv(FEAT_V, FEATURE_BLOCK)):
+                vcols = vchunk * FEATURE_BLOCK + tl.arange(0, FEATURE_BLOCK)
+                vcols_valid = vcols < FEAT_V
+                sel_values = tl.load(
+                    values
+                    + bh * VALUE_BH_STRIDE
+                    + indices[:, :, None] * VALUE_ROW_STRIDE
+                    + vcols[None, None, :],
+                    mask=row_mask[:, None, None]
+                    & kmask[:, None]
+                    & vcols_valid[None, None, :],
+                    other=0.0,
+                ).to(DTYPE)
+                do_tile = tl.load(
+                    grad_out
+                    + bh * GO_BH_STRIDE
+                    + rows[:, None] * GO_ROW_STRIDE
+                    + vcols[None, :],
+                    mask=row_mask[:, None] & vcols_valid[None, :],
+                    other=0.0,
+                ).to(DTYPE)
+                g_vals += tl.sum(sel_values * do_tile[:, None, :], axis=2)
+            delta += tl.sum(probs * g_vals, axis=1)
+
+        for kc in range(0, tl.cdiv(KP, KCHUNK)):
+            kcols = kc * KCHUNK + tl.arange(0, KCHUNK)
+            kmask = kcols < K
+            indices = tl.load(
+                top_indices + out_rows[:, None] * TI_ROW_STRIDE + kcols[None, :],
+                mask=row_mask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.int32)
+            scores = _recompute_selected_scores(
+                queries,
+                keys,
+                indices,
+                rows,
+                row_mask,
+                kmask[None, :],
+                bh,
+                QUERY_COUNT,
+                FEAT_Q,
+                QUERY_BH_STRIDE,
+                QUERY_ROW_STRIDE,
+                KEY_BH_STRIDE,
+                KEY_ROW_STRIDE,
+                QUERY_BLOCK,
+                KCHUNK,
+                FEATURE_BLOCK,
+                SCORE_SCALE,
+                DTYPE,
+            )
             lse_vals = tl.load(lse + out_rows, mask=row_mask, other=0.0).to(DTYPE)
             probs = tl.exp(scores - lse_vals[:, None])
             g_vals = tl.full((QUERY_BLOCK, KCHUNK), 0.0, DTYPE)
@@ -687,16 +774,31 @@ if triton is not None:
             for kc2 in range(0, tl.cdiv(KP, KCHUNK)):
                 kk = kc2 * KCHUNK + tl.arange(0, KCHUNK)
                 kk_mask = kk < K
-                scores = tl.load(
-                    top_scores + out_rows[:, None] * TS_ROW_STRIDE + kk[None, :],
-                    mask=row_mask[:, None] & kk_mask[None, :],
-                    other=-float("inf"),
-                ).to(DTYPE)
                 indices = tl.load(
                     top_indices + out_rows[:, None] * TI_ROW_STRIDE + kk[None, :],
                     mask=row_mask[:, None] & kk_mask[None, :],
                     other=0,
                 ).to(tl.int32)
+                scores = _recompute_selected_scores(
+                    queries,
+                    keys,
+                    indices,
+                    rows,
+                    row_mask,
+                    kk_mask[None, :],
+                    bh,
+                    QUERY_COUNT,
+                    FEAT_Q,
+                    QUERY_BH_STRIDE,
+                    QUERY_ROW_STRIDE,
+                    KEY_BH_STRIDE,
+                    KEY_ROW_STRIDE,
+                    QUERY_BLOCK,
+                    KCHUNK,
+                    FEATURE_BLOCK,
+                    SCORE_SCALE,
+                    DTYPE,
+                )
                 lse_vals = tl.load(lse + out_rows, mask=row_mask, other=0.0).to(DTYPE)
                 probs = tl.exp(scores - lse_vals[:, None])
                 g_vals = tl.full((QUERY_BLOCK, KCHUNK), 0.0, DTYPE)
@@ -746,8 +848,8 @@ if triton is not None:
     @triton.jit
     def _backward_dkv(
         queries,
+        keys,
         grad_out,
-        top_scores,
         top_indices,
         lse,
         d_scores,
@@ -765,7 +867,6 @@ if triton is not None:
         VALUE_ROW_STRIDE: tl.constexpr,
         GO_BH_STRIDE: tl.constexpr,
         GO_ROW_STRIDE: tl.constexpr,
-        TS_ROW_STRIDE: tl.constexpr,
         TI_ROW_STRIDE: tl.constexpr,
         DS_ROW_STRIDE: tl.constexpr,
         K: tl.constexpr,
@@ -773,6 +874,7 @@ if triton is not None:
         KCHUNK: tl.constexpr,
         QUERY_BLOCK: tl.constexpr,
         FEATURE_BLOCK: tl.constexpr,
+        SCORE_SCALE: tl.constexpr,
         DTYPE: tl.constexpr,
     ):
         """Backward B2: block-sparse atomic scatter of ``dK`` and ``dV``.
@@ -791,16 +893,31 @@ if triton is not None:
         for kc in range(0, tl.cdiv(KP, KCHUNK)):
             kcols = kc * KCHUNK + tl.arange(0, KCHUNK)
             kmask = kcols < K
-            scores = tl.load(
-                top_scores + out_rows[:, None] * TS_ROW_STRIDE + kcols[None, :],
-                mask=row_mask[:, None] & kmask[None, :],
-                other=-float("inf"),
-            ).to(DTYPE)
             indices = tl.load(
                 top_indices + out_rows[:, None] * TI_ROW_STRIDE + kcols[None, :],
                 mask=row_mask[:, None] & kmask[None, :],
                 other=0,
             ).to(tl.int32)
+            scores = _recompute_selected_scores(
+                queries,
+                keys,
+                indices,
+                rows,
+                row_mask,
+                kmask[None, :],
+                bh,
+                QUERY_COUNT,
+                FEAT_Q,
+                QUERY_BH_STRIDE,
+                QUERY_ROW_STRIDE,
+                KEY_BH_STRIDE,
+                KEY_ROW_STRIDE,
+                QUERY_BLOCK,
+                KCHUNK,
+                FEATURE_BLOCK,
+                SCORE_SCALE,
+                DTYPE,
+            )
             lse_vals = tl.load(lse + out_rows, mask=row_mask, other=0.0).to(DTYPE)
             probs = tl.exp(scores - lse_vals[:, None])
             d_s = tl.load(
@@ -861,128 +978,149 @@ if triton is not None:
 
 
 class FusedTopKAttentionFunction(torch.autograd.Function):
-    """Unified fused top-k dictionary attention with analytical backward.
+    """Top-k attention with hybrid cuBLAS/Triton forward and sparse backward.
 
-    Forward fuses tiled affinity and the in-register running top-k before
-    the existing gather-densify online-softmax aggregation, keeping the
-    dense ``N x M`` matrix out of HBM entirely. Backward recomputes the
-    softmax on the saved sparse support only. Inputs must be rank-4
-    ``(B, H, N, d)`` / ``(B, H, M, d_k)`` / ``(B, H, M, d_v)`` float32 or
-    float64 CUDA tensors; float16 stays on the reference path.
+    Float32 affinity is computed by chunked cuBLAS GEMMs; a Triton kernel
+    merges chunk candidates, applies top-k softmax, and gathers values.
+    Float64 retains the original Triton affinity path for gradcheck.
+    Backward computes gradients only on the saved sparse support.
     """
 
     @staticmethod
-    def forward(ctx, queries, keys, values, k):
+    def forward(ctx, queries, keys, values, k, temperature=1.0):
         batch, heads, query_count, feat_q = queries.shape
         key_count = keys.shape[2]
         feat_v = values.shape[3]
         batch_heads = batch * heads
         device = queries.device
         dtype = queries.dtype
+        score_scale = 1.0 / (temperature * math.sqrt(feat_q))
 
         queries2 = queries.reshape(batch_heads, query_count, feat_q)
         keys2 = keys.reshape(batch_heads, key_count, feat_q)
         values2 = values.reshape(batch_heads, key_count, feat_v)
 
-        top_scores = torch.empty(
-            (batch_heads, query_count, k), device=device, dtype=dtype
-        )
-        top_indices = torch.empty(
-            (batch_heads, query_count, k), device=device, dtype=torch.int32
-        )
-        arr_len = max(FUSED_KEY_BLOCK, triton.next_power_of_2(k + FUSED_KEY_BLOCK))
-        sort_stages = int(math.log2(arr_len))
-        query_block = min(FUSED_QUERY_BLOCK, triton.next_power_of_2(query_count))
-        feature_block = min(FUSED_FEATURE_BLOCK, triton.next_power_of_2(feat_q))
-        # tl.dot has no float64 lowering; micro gradcheck shapes ride the
-        # elementwise path regardless of size.
-        use_dot = (
-            min(query_block, arr_len, feature_block) >= 16
-            and dtype != torch.float64
-        )
-        grid = (triton.cdiv(query_count, query_block), batch_heads)
-        _fused_affinity_topk[grid](
-            queries2,
-            keys2,
-            top_scores,
-            top_indices,
-            query_count,
-            key_count,
-            feat_q,
-            queries2.stride(0),
-            queries2.stride(1),
-            keys2.stride(0),
-            keys2.stride(1),
-            top_scores.stride(1),
-            top_indices.stride(1),
-            k,
-            arr_len,
-            sort_stages,
-            query_block,
-            feature_block,
-            FUSED_KEY_BLOCK,
-            use_dot,
-            key_count,
-            _FUSED_DTYPE_MAP[dtype],
-        )
+        if dtype == torch.float32 and k < key_count:
+            from kernels.hybrid_topk import _hybrid_topk_attention_with_aux
 
-        maxima = top_scores.max(dim=-1, keepdim=True).values
-        lse = (maxima + torch.log(torch.exp(top_scores - maxima).sum(dim=-1, keepdim=True))).squeeze(-1)
-
-        if dtype == torch.float64:
-            broadcast_values = values2.unsqueeze(1).expand(
-                batch_heads, query_count, key_count, feat_v
-            )
-            gathered = torch.gather(
-                broadcast_values,
-                2,
-                top_indices.long().unsqueeze(-1).expand(
-                    batch_heads, query_count, k, feat_v
-                ),
-            )
-            weights = torch.softmax(top_scores, dim=-1)
-            saved_out = (weights.unsqueeze(-1) * gathered).sum(dim=2)
-        else:
-            saved_out = torch.empty(
-                (batch_heads, query_count, feat_v),
-                device=device,
-                dtype=torch.float32,
-            )
-            for index in range(batch_heads):
-                saved_out[index] = tiled_topk_aggregate(
-                    top_scores[index], top_indices[index], values2[index]
+            top_scores, top_indices, lse, saved_out = (
+                _hybrid_topk_attention_with_aux(
+                    queries, keys, values, k, score_scale
                 )
+            )
+        else:
+            top_scores = torch.empty(
+                (batch_heads, query_count, k), device=device, dtype=dtype
+            )
+            top_indices = torch.empty(
+                (batch_heads, query_count, k), device=device, dtype=torch.int32
+            )
+            key_block = 128 if feat_q == 64 else FUSED_KEY_BLOCK
+            arr_len = max(
+                key_block, triton.next_power_of_2(k + key_block)
+            )
+            sort_stages = int(math.log2(arr_len))
+            query_block = min(FUSED_QUERY_BLOCK, triton.next_power_of_2(query_count))
+            feature_block = min(FUSED_FEATURE_BLOCK, triton.next_power_of_2(feat_q))
+            # tl.dot has no float64 lowering; micro gradcheck shapes ride the
+            # elementwise path regardless of size.
+            use_dot = (
+                min(query_block, arr_len, feature_block) >= 16
+                and dtype != torch.float64
+            )
+            grid = (triton.cdiv(query_count, query_block), batch_heads)
+            _fused_affinity_topk[grid](
+                queries2,
+                keys2,
+                top_scores,
+                top_indices,
+                query_count,
+                key_count,
+                feat_q,
+                queries2.stride(0),
+                queries2.stride(1),
+                keys2.stride(0),
+                keys2.stride(1),
+                top_scores.stride(1),
+                top_indices.stride(1),
+                k,
+                arr_len,
+                sort_stages,
+                query_block,
+                feature_block,
+                key_block,
+                use_dot,
+                key_count,
+                _FUSED_DTYPE_MAP[dtype],
+            )
+            top_scores = top_scores * score_scale
+            maxima = top_scores.max(dim=-1, keepdim=True).values
+            lse = (
+                maxima
+                + torch.log(
+                    torch.exp(top_scores - maxima).sum(dim=-1, keepdim=True)
+                )
+            ).squeeze(-1)
+
+            if dtype == torch.float64:
+                broadcast_values = values2.unsqueeze(1).expand(
+                    batch_heads, query_count, key_count, feat_v
+                )
+                gathered = torch.gather(
+                    broadcast_values,
+                    2,
+                    top_indices.long().unsqueeze(-1).expand(
+                        batch_heads, query_count, k, feat_v
+                    ),
+                )
+                weights = torch.softmax(top_scores, dim=-1)
+                saved_out = (weights.unsqueeze(-1) * gathered).sum(dim=2)
+            else:
+                saved_out = torch.empty(
+                    (batch_heads, query_count, feat_v),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                for index in range(batch_heads):
+                    saved_out[index] = tiled_topk_aggregate(
+                        top_scores[index], top_indices[index], values2[index]
+                    )
 
         result = saved_out.view(batch, heads, query_count, feat_v)
-        ctx.save_for_backward(
-            queries2, keys2, values2, top_scores, top_indices, lse, saved_out
-        )
+        ctx.save_for_backward(queries2, keys2, values2, top_indices, lse)
         ctx.fused_geometry = (
-            batch, heads, query_count, feat_q, key_count, feat_v, k
+            batch, heads, query_count, feat_q, key_count, feat_v, k, score_scale
         )
         return result
 
     @staticmethod
     def backward(ctx, grad_output):
-        queries2, keys2, values2, top_scores, top_indices, lse, saved_out = (
-            ctx.saved_tensors
-        )
-        batch, heads, query_count, feat_q, key_count, feat_v, k = ctx.fused_geometry
+        queries2, keys2, values2, top_indices, lse = ctx.saved_tensors
+        (
+            batch,
+            heads,
+            query_count,
+            feat_q,
+            key_count,
+            feat_v,
+            k,
+            score_scale,
+        ) = ctx.fused_geometry
         batch_heads = batch * heads
-        dtype = saved_out.dtype
+        dtype = queries2.dtype
         grad_output2 = grad_output.reshape(batch_heads, query_count, feat_v)
 
         d_scores = torch.empty(
-            (batch_heads, query_count, k), device=saved_out.device, dtype=dtype
+            (batch_heads, query_count, k), device=queries2.device, dtype=dtype
         )
         dq = torch.empty(
-            (batch_heads, query_count, feat_q), device=saved_out.device, dtype=dtype
+            (batch_heads, query_count, feat_q), device=queries2.device, dtype=dtype
         )
         d_keys = torch.zeros(
-            (batch_heads, key_count, feat_q), device=saved_out.device, dtype=dtype
+            (batch_heads, key_count, feat_q), device=queries2.device, dtype=dtype
         )
         d_values = torch.zeros(
-            (batch_heads, key_count, feat_v), device=saved_out.device, dtype=dtype
+            (batch_heads, key_count, feat_v), device=queries2.device, dtype=dtype
         )
         query_block = min(
             FUSED_BACKWARD_QUERY_BLOCK, triton.next_power_of_2(query_count)
@@ -996,8 +1134,6 @@ class FusedTopKAttentionFunction(torch.autograd.Function):
             keys2,
             values2,
             grad_output2,
-            saved_out,
-            top_scores,
             top_indices,
             lse,
             d_scores,
@@ -1014,9 +1150,6 @@ class FusedTopKAttentionFunction(torch.autograd.Function):
             values2.stride(1),
             grad_output2.stride(0),
             grad_output2.stride(1),
-            saved_out.stride(0),
-            saved_out.stride(1),
-            top_scores.stride(1),
             top_indices.stride(1),
             d_scores.stride(1),
             dq.stride(1),
@@ -1025,12 +1158,13 @@ class FusedTopKAttentionFunction(torch.autograd.Function):
             kchunk,
             query_block,
             feature_block,
+            score_scale,
             _FUSED_DTYPE_MAP[dtype],
         )
         _backward_dkv[grid](
             queries2,
+            keys2,
             grad_output2,
-            top_scores,
             top_indices,
             lse,
             d_scores,
@@ -1048,7 +1182,6 @@ class FusedTopKAttentionFunction(torch.autograd.Function):
             values2.stride(1),
             grad_output2.stride(0),
             grad_output2.stride(1),
-            top_scores.stride(1),
             top_indices.stride(1),
             d_scores.stride(1),
             k,
@@ -1056,12 +1189,14 @@ class FusedTopKAttentionFunction(torch.autograd.Function):
             kchunk,
             query_block,
             feature_block,
+            score_scale,
             _FUSED_DTYPE_MAP[dtype],
         )
         return (
-            dq.view(batch, heads, query_count, feat_q),
-            d_keys.view(batch, heads, key_count, feat_q),
+            dq.view(batch, heads, query_count, feat_q) * score_scale,
+            d_keys.view(batch, heads, key_count, feat_q) * score_scale,
             d_values.view(batch, heads, key_count, feat_v),
+            None,
             None,
         )
 
@@ -1071,13 +1206,14 @@ def fused_topk_attention(
     keys: torch.Tensor,
     values: torch.Tensor,
     k: int,
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """Fused CUDA sparse top-k cross attention returning ``(B, H, N, d_v)``.
 
-    Validates the same geometry as the reference path (matching leading
-    ``(B, H)`` dims, contiguous feature dims, CUDA tensors), restricted to
-    float32/float64 until fp16 backward is implemented. Raises ``ValueError``
-    with actionable messages otherwise.
+    Scores are scaled by ``1 / (temperature * sqrt(d_k))``. Inputs must
+    share leading ``(B, H)`` dimensions and be contiguous CUDA tensors;
+    float32 and float64 are supported. Raises ``ValueError`` with actionable
+    messages for invalid geometry or temperature.
     """
     for name, tensor in (
         ("queries", queries),
@@ -1135,6 +1271,10 @@ def fused_topk_attention(
         raise ValueError(
             f"k must be an integer in [1, {keys.shape[2]}]; got {k}"
         )
+    if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
+        raise ValueError("temperature must be a positive finite number")
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature must be a positive finite number")
     if queries.device.type != "cuda" or keys.device.type != "cuda" or values.device.type != "cuda":
         raise ValueError("fused path requires CUDA tensors")
     if queries.device != keys.device or queries.device != values.device:
@@ -1144,4 +1284,6 @@ def fused_topk_attention(
             "Triton is required for fused_topk_attention; install a "
             "Triton-enabled PyTorch environment"
         )
-    return FusedTopKAttentionFunction.apply(queries, keys, values, k)
+    return FusedTopKAttentionFunction.apply(
+        queries, keys, values, k, float(temperature)
+    )

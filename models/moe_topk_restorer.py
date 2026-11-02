@@ -191,14 +191,14 @@ def _charbonnier(prediction, target, eps=1e-6):
     return (delta * delta + eps).sqrt()
 
 
-def charbonnier_loss(prediction, target):
+def charbonnier_loss(prediction, target, eps=1e-6):
     """Mean Charbonnier reconstruction loss (robust L1 surrogate)."""
     if prediction.shape != target.shape:
         raise ValueError(
             f"prediction shape {tuple(prediction.shape)} does not match "
             f"target shape {tuple(target.shape)}"
         )
-    return _charbonnier(prediction, target).mean()
+    return _charbonnier(prediction, target, eps=eps).mean()
 
 
 def gradient_difference_loss(prediction, target, eps=1e-6):
@@ -231,12 +231,12 @@ def mutual_coherence_of(atoms: torch.Tensor) -> torch.Tensor:
 
 
 class MasterMoETopKRestorer(nn.Module):
-    """Master restorer unifying Phase-6 modules with a structured loss dict.
+    """Master restorer with scale-aware routing and a structured loss dict.
 
     Pipeline: stem -> entropy gate (bypass mixed tokens + pass-through
-    mask) -> dual-domain MoE dictionaries (routed spatial banks + wavelet
-    LL + Fourier amplitude) -> parallel dilated affine modulation ->
-    residual fusion and reconstruction head.
+    mask) -> four scale-routed spatial/wavelet/Fourier expert banks ->
+    parallel dilated affine modulation -> residual fusion and a scale-1
+    projection or Pixel-Shuffle x2/x3/x4 reconstruction head.
 
     Returns ``(I_rec, loss_dict)`` where ``loss_dict`` holds differentiable
     scalars: ``charbonnier``, ``gradient_difference``, ``load_balance``,
@@ -291,6 +291,14 @@ class MasterMoETopKRestorer(nn.Module):
         self.attention_projection = nn.Linear(self.d, self.d)
         self.fusion = nn.Conv2d(self.d, self.d, kernel_size=3, padding=1)
         self.reconstruction = nn.Conv2d(self.d, 3, kernel_size=3, padding=1)
+        self.super_resolution_heads = nn.ModuleDict(
+            {
+                str(scale): nn.Conv2d(
+                    self.d, 3 * scale * scale, kernel_size=3, padding=1
+                )
+                for scale in (2, 3, 4)
+            }
+        )
         self.balance_loss = AuxiliaryLoadBalanceLoss(weight=aux_weight)
         self.coherence_loss = MutualCoherenceLoss(
             lambda_fp=coherence_lambda_fp,
@@ -298,6 +306,9 @@ class MasterMoETopKRestorer(nn.Module):
         )
         nn.init.normal_(self.reconstruction.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.reconstruction.bias)
+        for head in self.super_resolution_heads.values():
+            nn.init.normal_(head.weight, mean=0.0, std=1e-3)
+            nn.init.zeros_(head.bias)
 
     def _effective_top_k(self, adaptive_k: torch.Tensor) -> int:
         """Collapse per-token k_i to one selectable integer budget."""
@@ -312,6 +323,8 @@ class MasterMoETopKRestorer(nn.Module):
         reference: torch.Tensor | None = None,
         output_size: tuple[int, int] | None = None,
         total_loss: bool = False,
+        scale_factor: int = 1,
+        return_details: bool = False,
     ):
         if image.ndim != 4 or image.size(1) != 3:
             raise ValueError(
@@ -325,7 +338,18 @@ class MasterMoETopKRestorer(nn.Module):
                 "FusedTopKAttentionFunction Triton kernel on CUDA, which is "
                 "not yet implemented; run with the reference path instead"
             )
-        if output_size is not None:
+        if scale_factor not in (1, 2, 3, 4):
+            raise ValueError(
+                f"scale_factor must be one of 1, 2, 3, or 4; got {scale_factor}"
+            )
+        if output_size is not None and scale_factor != 1:
+            expected_size = (image.size(-2) * scale_factor, image.size(-1) * scale_factor)
+            if tuple(output_size) != expected_size:
+                raise ValueError(
+                    f"output_size {tuple(output_size)} must match the "
+                    f"{scale_factor}x output size {expected_size}"
+                )
+        if output_size is not None and scale_factor == 1:
             if len(output_size) != 2 or min(output_size) <= 0:
                 raise ValueError(
                     f"output_size must be positive (H, W); got {output_size}"
@@ -333,13 +357,6 @@ class MasterMoETopKRestorer(nn.Module):
             image = F.interpolate(
                 image, size=output_size, mode="bicubic", align_corners=False
             ).clamp(0, 1)
-
-        target = image if reference is None else reference
-        if tuple(target.shape) != tuple(image.shape):
-            raise ValueError(
-                f"reference shape {tuple(target.shape)} must match the "
-                f"processed image shape {tuple(image.shape)}"
-            )
 
         features = self.stem(image)
         batch, channels, height, width = features.shape
@@ -352,7 +369,7 @@ class MasterMoETopKRestorer(nn.Module):
             batch, channels, height, width
         )
         attention_map, gates = self.dual_domain(
-            attention_input, return_gates=True
+            attention_input, return_gates=True, scale_factor=scale_factor
         )
         attention_tokens = attention_map.flatten(2).transpose(1, 2)
 
@@ -365,14 +382,54 @@ class MasterMoETopKRestorer(nn.Module):
 
         fused = features + F.gelu(self.fusion(attended))
         reconstruction_input = F.gelu(fused)
-        prediction = (image + self.reconstruction(reconstruction_input)).clamp(0, 1)
+        if scale_factor == 1:
+            residual = self.reconstruction(reconstruction_input)
+            base = image
+        else:
+            residual = F.pixel_shuffle(
+                self.super_resolution_heads[str(scale_factor)](reconstruction_input),
+                scale_factor,
+            )
+            base = F.interpolate(
+                image,
+                scale_factor=scale_factor,
+                mode="bicubic",
+                align_corners=False,
+            )
+        prediction = (base + residual).clamp(0, 1)
 
+        target = base if reference is None else reference
+        if tuple(target.shape) != tuple(prediction.shape):
+            raise ValueError(
+                f"reference shape {tuple(target.shape)} must match the "
+                f"prediction shape {tuple(prediction.shape)}"
+            )
         losses = {
-            "charbonnier": charbonnier_loss(prediction, target),
+            "charbonnier": charbonnier_loss(prediction, target, eps=1e-3),
             "gradient_difference": gradient_difference_loss(prediction, target),
             "load_balance": self.balance_loss(gates),
             "coherence": self.coherence_loss(
                 self.dual_domain.dictionary.flatten(end_dim=-2)
             ),
         }
+        if return_details:
+            routing_load = gates.detach().mean(dim=(0, 1))
+            details = {
+                "expert_load": routing_load,
+                "entropy_active_fraction": gate_result.gate.detach().mean(),
+                "entropy_mean": gate_result.entropy.detach().mean(),
+                "entropy_threshold": (
+                    gate_result.threshold.detach()
+                    if gate_result.threshold is not None
+                    else None
+                ),
+                "active_atoms_per_expert": (
+                    self.dual_domain.atoms_per_expert // 2
+                    if scale_factor == 2
+                    else (3 * self.dual_domain.atoms_per_expert) // 4
+                    if scale_factor == 3
+                    else self.dual_domain.atoms_per_expert
+                ),
+            }
+            return prediction, (sum(losses.values()) if total_loss else losses), details
         return prediction, sum(losses.values()) if total_loss else losses

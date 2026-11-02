@@ -1,0 +1,830 @@
+"""Resumable Phase-7 universal multi-task training."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import os
+import random
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Sampler
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from data.universal_loader import TASK_SCALES, UniversalRestorationDataset
+from models.moe_topk_restorer import MasterMoETopKRestorer, mutual_coherence_of
+
+
+class FixedOrderSampler(Sampler[int]):
+    def __init__(self, indices: list[int]) -> None:
+        self.indices = indices
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _atomic_checkpoint(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, path)
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "cuda" in state:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def _ssim(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    kernel_size = min(11, prediction.size(-2), prediction.size(-1))
+    if kernel_size % 2 == 0:
+        kernel_size -= 1
+    kernel_size = max(1, kernel_size)
+    padding = kernel_size // 2
+    coordinate = torch.arange(
+        kernel_size, device=prediction.device, dtype=prediction.dtype
+    ) - padding
+    gaussian_1d = torch.exp(-0.5 * (coordinate / 1.5).square())
+    gaussian_1d = gaussian_1d / gaussian_1d.sum()
+    kernel = torch.outer(gaussian_1d, gaussian_1d)
+    kernel = kernel.expand(prediction.size(1), 1, kernel_size, kernel_size)
+
+    def filter_spatial(value: torch.Tensor) -> torch.Tensor:
+        return F.conv2d(value, kernel, padding=padding, groups=value.size(1))
+
+    mean_pred = filter_spatial(prediction)
+    mean_target = filter_spatial(target)
+    var_pred = filter_spatial(prediction.square()) - mean_pred.square()
+    var_target = filter_spatial(target.square()) - mean_target.square()
+    covariance = filter_spatial(prediction * target) - mean_pred * mean_target
+    c1, c2 = 0.01**2, 0.03**2
+    score = ((2 * mean_pred * mean_target + c1) * (2 * covariance + c2)) / (
+        (mean_pred.square() + mean_target.square() + c1)
+        * (var_pred + var_target + c2)
+    )
+    return score.mean()
+
+
+def _metrics(prediction: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+    mse = F.mse_loss(prediction, target).clamp_min(1e-12)
+    return {
+        "psnr": float((-10.0 * torch.log10(mse)).item()),
+        "ssim": float(_ssim(prediction, target).item()),
+        "l1": float(F.l1_loss(prediction, target).item()),
+    }
+
+
+def _model_config(args: argparse.Namespace) -> dict[str, int | float]:
+    return {
+        "d": args.dim,
+        "atoms_per_expert": args.atoms_per_expert,
+        "top_k": args.top_k,
+        "noise_std": args.logit_jitter if args.phase == "warmup" else 0.0,
+        "aux_weight": args.aux_weight,
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _training_config(args: argparse.Namespace) -> dict[str, Any]:
+    init_checkpoint = args.init_checkpoint
+    return {
+        "phase": args.phase,
+        "train_manifest": str(args.train_manifest.resolve()),
+        "train_manifest_sha256": _file_sha256(args.train_manifest),
+        "validation_manifest": str(args.validation_manifest.resolve()),
+        "validation_manifest_sha256": _file_sha256(args.validation_manifest),
+        "init_checkpoint": (
+            str(init_checkpoint.resolve())
+            if init_checkpoint is not None
+            else None
+        ),
+        "init_checkpoint_sha256": (
+            _file_sha256(init_checkpoint)
+            if init_checkpoint is not None
+            else None
+        ),
+        "steps_per_epoch": args.steps_per_epoch,
+        "patch_size": args.patch_size,
+        "validation_samples_per_task": args.validation_samples_per_task,
+        "learning_rate": args.learning_rate,
+        "warmup_epochs": args.warmup_epochs,
+        "gdl_weight": args.gdl_weight,
+        "coherence_weight": args.coherence_weight,
+        "checkpoint_every_steps": args.checkpoint_every_steps,
+        "log_every_steps": args.log_every_steps,
+        "seed": args.seed,
+        "model_config": _model_config(args),
+    }
+
+
+def _load_dictionary(
+    model: MasterMoETopKRestorer, checkpoint_path: Path, device: torch.device
+) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    dictionary = checkpoint.get("expert_dictionary")
+    if dictionary is None:
+        dictionary = checkpoint.get("dictionary")
+    if dictionary is None:
+        raise ValueError(
+            f"{checkpoint_path} has neither expert_dictionary nor dictionary"
+        )
+    dictionary = torch.as_tensor(dictionary, device=device, dtype=torch.float32)
+    expected = tuple(model.dual_domain.dictionary.shape)
+    if tuple(dictionary.shape) == (expected[0] * expected[1], expected[2]):
+        dictionary = dictionary.reshape(expected)
+    if tuple(dictionary.shape) != expected:
+        raise ValueError(
+            f"dictionary shape {tuple(dictionary.shape)} does not match model "
+            f"shape {expected}"
+        )
+    with torch.no_grad():
+        model.dual_domain.dictionary.copy_(dictionary)
+
+
+def _save_checkpoint(
+    path: Path,
+    model: MasterMoETopKRestorer,
+    optimizer: torch.optim.Optimizer,
+    args: argparse.Namespace,
+    epoch: int,
+    next_batch: int,
+    global_step: int,
+    history: list[dict[str, Any]],
+    best_psnr: float,
+    training_config: dict[str, Any],
+    partial_training: dict[str, Any] | None = None,
+) -> None:
+    _atomic_checkpoint(
+        path,
+        {
+            "format_version": 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "model_config": _model_config(args),
+            "training_config": training_config,
+            "phase": args.phase,
+            "epoch": epoch,
+            "next_batch": next_batch,
+            "global_step": global_step,
+            "best_validation_psnr": best_psnr,
+            "history": history,
+            "partial_training": partial_training or {},
+            "trainer_status": {
+                "status": "in_progress",
+                "phase": args.phase,
+                "epoch": epoch,
+                "next_batch": next_batch,
+                "global_step": global_step,
+                "updated_unix": time.time(),
+            },
+            "rng_state": _rng_state(),
+        },
+    )
+    _atomic_json(
+        path.parent / "trainer_status.json",
+        {
+            "status": "in_progress",
+            "phase": args.phase,
+            "epoch": epoch,
+            "next_batch": next_batch,
+            "global_step": global_step,
+            "checkpoint": str(path),
+            "updated_unix": time.time(),
+        },
+    )
+
+
+def _validation(
+    model: MasterMoETopKRestorer,
+    dataset: UniversalRestorationDataset,
+    device: torch.device,
+    max_samples_per_task: int,
+    seed: int,
+) -> dict[str, Any]:
+    model.eval()
+    model.dual_domain.spatial_router.active_experts = 1
+    dataset.set_epoch(0)
+    selected: dict[str, list[int]] = defaultdict(list)
+    for index, (_, task, _) in enumerate(dataset.rows):
+        if len(selected[task]) < max_samples_per_task:
+            selected[task].append(index)
+    per_task: dict[str, dict[str, float]] = {}
+    loads: list[torch.Tensor] = []
+    entropy_active = []
+    entropy_means = []
+    entropy_thresholds = []
+    for task, indices in sorted(selected.items()):
+        records: list[dict[str, float]] = []
+        for index in indices:
+            sample = dataset[index]
+            low_quality = sample.low_quality.unsqueeze(0).to(device)
+            target = sample.clean.unsqueeze(0).to(device)
+            with torch.inference_mode():
+                prediction, _, details = model(
+                    low_quality,
+                    reference=target,
+                    scale_factor=sample.scale_factor,
+                    return_details=True,
+                )
+            records.append(_metrics(prediction, target))
+            loads.append(details["expert_load"].cpu())
+            entropy_active.append(float(details["entropy_active_fraction"].item()))
+            entropy_means.append(float(details["entropy_mean"].item()))
+            threshold = details["entropy_threshold"]
+            if threshold is not None:
+                entropy_thresholds.append(float(threshold.item()))
+        per_task[task] = {
+            key: sum(record[key] for record in records) / len(records)
+            for key in ("psnr", "ssim", "l1")
+        }
+        per_task[task]["samples"] = len(records)
+    if not per_task:
+        raise ValueError("validation manifest has no supported tasks")
+    task_metrics = list(per_task.values())
+    return {
+        "tasks": per_task,
+        "mean_psnr": sum(item["psnr"] for item in task_metrics) / len(task_metrics),
+        "mean_ssim": sum(item["ssim"] for item in task_metrics) / len(task_metrics),
+        "expert_load": (
+            torch.stack(loads).mean(dim=0).tolist() if loads else [0.0] * 4
+        ),
+        "entropy_active_fraction": (
+            sum(entropy_active) / len(entropy_active) if entropy_active else 0.0
+        ),
+        "entropy_mean": (
+            sum(entropy_means) / len(entropy_means) if entropy_means else 0.0
+        ),
+        "entropy_threshold": (
+            sum(entropy_thresholds) / len(entropy_thresholds)
+            if entropy_thresholds
+            else None
+        ),
+        "mutual_coherence_max": float(
+            mutual_coherence_of(model.dual_domain.dictionary.detach()).item()
+        ),
+        "seed": seed,
+    }
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(record, sort_keys=True) + "\n")
+        output.flush()
+
+
+def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _truncate_step_log(path: Path, checkpoint_step: int) -> None:
+    if not path.is_file():
+        return
+    kept = []
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            record = json.loads(line)
+            if int(record["global_step"]) <= checkpoint_step:
+                kept.append(record)
+    _write_jsonl(path, kept)
+
+
+def _write_task_metrics(path: Path, records: list[dict[str, Any]]) -> None:
+    fields = (
+        "epoch",
+        "global_step",
+        "phase",
+        "task",
+        "train_loss",
+        "train_charbonnier",
+        "train_gradient_difference",
+        "train_load_balance",
+        "train_coherence",
+        "validation_psnr",
+        "validation_ssim",
+        "validation_l1",
+        "expert_load_0",
+        "expert_load_1",
+        "expert_load_2",
+        "expert_load_3",
+        "train_expert_load_0",
+        "train_expert_load_1",
+        "train_expert_load_2",
+        "train_expert_load_3",
+        "train_entropy_active_fraction",
+        "train_entropy_mean",
+        "train_entropy_threshold",
+        "entropy_active_fraction",
+        "entropy_mean",
+        "entropy_threshold",
+        "mutual_coherence_max",
+    )
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for record in records:
+            for task, validation in record["validation"]["tasks"].items():
+                training = record["training_by_task"].get(task, {})
+                row: dict[str, Any] = {
+                    "epoch": record["epoch"],
+                    "global_step": record["global_step"],
+                    "phase": record["phase"],
+                    "task": task,
+                    "validation_psnr": validation["psnr"],
+                    "validation_ssim": validation["ssim"],
+                    "validation_l1": validation["l1"],
+                    "entropy_active_fraction": record["validation"][
+                        "entropy_active_fraction"
+                    ],
+                    "entropy_mean": record["validation"]["entropy_mean"],
+                    "entropy_threshold": record["validation"]["entropy_threshold"],
+                    "mutual_coherence_max": record["validation"][
+                        "mutual_coherence_max"
+                    ],
+                }
+                for name in (
+                    "loss",
+                    "charbonnier",
+                    "gradient_difference",
+                    "load_balance",
+                    "coherence",
+                ):
+                    row[f"train_{name}"] = training.get(name, "")
+                for expert, value in enumerate(record["validation"]["expert_load"]):
+                    row[f"expert_load_{expert}"] = value
+                for expert in range(4):
+                    row[f"train_expert_load_{expert}"] = training.get(
+                        f"expert_load_{expert}", ""
+                    )
+                for name in (
+                    "entropy_active_fraction",
+                    "entropy_mean",
+                    "entropy_threshold",
+                ):
+                    row[f"train_{name}"] = training.get(name, "")
+                writer.writerow(row)
+    os.replace(temporary, path)
+
+
+def _restore_checkpoint(
+    path: Path,
+    model: MasterMoETopKRestorer,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    expected_phase: str,
+    expected_config: dict[str, int | float],
+    expected_training_config: dict[str, Any],
+) -> tuple[int, int, int, list[dict[str, Any]], float, dict[str, Any]]:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if checkpoint.get("phase") != expected_phase:
+        raise ValueError(f"{path} belongs to a different training phase")
+    if checkpoint.get("model_config") != expected_config:
+        raise ValueError(
+            f"{path} model configuration does not match the current run: "
+            f"{checkpoint.get('model_config')}"
+        )
+    if checkpoint.get("training_config") != expected_training_config:
+        raise ValueError(
+            f"{path} training configuration or manifest differs from the "
+            "current run; use the original settings or a new output directory"
+        )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    _restore_rng_state(checkpoint["rng_state"])
+    return (
+        int(checkpoint["epoch"]),
+        int(checkpoint["next_batch"]),
+        int(checkpoint["global_step"]),
+        list(checkpoint.get("history", [])),
+        float(checkpoint.get("best_validation_psnr", -math.inf)),
+        dict(checkpoint.get("partial_training", {})),
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=("warmup", "fine_tune"), required=True)
+    parser.add_argument("--train-manifest", type=Path, required=True)
+    parser.add_argument("--validation-manifest", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--warmup-epochs", type=int, default=50)
+    parser.add_argument("--steps-per-epoch", type=int, default=100)
+    parser.add_argument("--patch-size", type=int, default=128)
+    parser.add_argument("--validation-samples-per-task", type=int, default=8)
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--atoms-per-expert", type=int, default=1024)
+    parser.add_argument("--top-k", type=int, default=16)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--logit-jitter", type=float, default=0.1)
+    parser.add_argument("--aux-weight", type=float, default=0.01)
+    parser.add_argument("--gdl-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--coherence-weight",
+        type=float,
+        default=1e-6,
+        help="weight for the raw Task 6.1 Frame-Potential/Welch loss",
+    )
+    parser.add_argument("--checkpoint-every-steps", type=int, default=100)
+    parser.add_argument("--log-every-steps", type=int, default=10)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=2027)
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    args = parser.parse_args(argv)
+    if args.epochs <= 0 or args.steps_per_epoch <= 0:
+        parser.error("--epochs and --steps-per-epoch must be positive")
+    if args.warmup_epochs < 0 or args.validation_samples_per_task <= 0:
+        parser.error("--warmup-epochs must be non-negative and validation count positive")
+    if args.patch_size < 8 or args.patch_size % 4:
+        parser.error("--patch-size must be at least 8 and divisible by 4")
+    if args.atoms_per_expert < 2 or not 1 <= args.top_k <= 2 * args.atoms_per_expert:
+        parser.error("--atoms-per-expert and --top-k are incompatible")
+    if args.checkpoint_every_steps <= 0 or args.log_every_steps <= 0:
+        parser.error("checkpoint and log intervals must be positive")
+    if args.learning_rate <= 0 or args.num_workers < 0:
+        parser.error("learning rate must be positive and num-workers non-negative")
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA was requested but is unavailable")
+
+    train_dataset = UniversalRestorationDataset(
+        args.train_manifest, patch_size=args.patch_size, seed=args.seed
+    )
+    validation_dataset = UniversalRestorationDataset(
+        args.validation_manifest, patch_size=args.patch_size, seed=args.seed + 1
+    )
+    for dataset in (train_dataset, validation_dataset):
+        for _, task, _ in dataset.rows:
+            if TASK_SCALES[task] > 1 and args.patch_size % TASK_SCALES[task]:
+                parser.error(
+                    f"--patch-size must be divisible by the {task} scale "
+                    f"({TASK_SCALES[task]})"
+                )
+
+    _seed_everything(args.seed)
+    model = MasterMoETopKRestorer(
+        d=args.dim,
+        atoms_per_expert=args.atoms_per_expert,
+        top_k=args.top_k,
+        noise_std=args.logit_jitter if args.phase == "warmup" else 0.0,
+        aux_weight=args.aux_weight,
+    ).to(device)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = args.output_dir / "latest.pt"
+    training_config = _training_config(args)
+    if not args.resume and latest_path.is_file():
+        parser.error(
+            f"{latest_path} already exists; use --resume or choose a new output directory"
+        )
+    if args.resume and latest_path.is_file():
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        (
+            start_epoch,
+            first_batch,
+            global_step,
+            history,
+            best_psnr,
+            resumed_partial,
+        ) = _restore_checkpoint(
+            latest_path,
+            model,
+            optimizer,
+            device,
+            args.phase,
+            _model_config(args),
+            training_config,
+        )
+        print(
+            f"Resuming {args.phase} at epoch={start_epoch + 1}, "
+            f"batch={first_batch}, step={global_step}",
+            flush=True,
+        )
+    else:
+        if args.init_checkpoint is not None:
+            if not args.init_checkpoint.is_file():
+                parser.error(f"initial checkpoint does not exist: {args.init_checkpoint}")
+            initialized = torch.load(
+                args.init_checkpoint, map_location=device, weights_only=False
+            )
+            model_state = initialized.get("model_state_dict")
+            if model_state is not None:
+                model.load_state_dict(model_state)
+            else:
+                _load_dictionary(model, args.init_checkpoint, device)
+        elif args.phase == "warmup":
+            parser.error("warmup requires --init-checkpoint from Stage A dictionary seeding")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        start_epoch, first_batch, global_step, history, best_psnr = 0, 0, 0, [], -math.inf
+        resumed_partial = {}
+
+    step_log = args.output_dir / "steps.jsonl"
+    epoch_log = args.output_dir / "metrics.jsonl"
+    task_log = args.output_dir / "metrics_by_task.csv"
+    _truncate_step_log(step_log, global_step)
+    _write_jsonl(epoch_log, history)
+    _write_task_metrics(task_log, history)
+    total_batches = min(args.steps_per_epoch, len(train_dataset))
+    if total_batches <= 0:
+        parser.error("training manifest is empty")
+    model.train()
+    started = time.monotonic()
+    epoch = start_epoch
+    batch_index = first_batch - 1
+    totals: dict[str, dict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    task_counts: dict[str, int] = defaultdict(int)
+    try:
+        for epoch in range(start_epoch, args.epochs):
+            train_dataset.set_epoch(epoch)
+            generator = torch.Generator().manual_seed(args.seed + epoch)
+            order = torch.randperm(len(train_dataset), generator=generator).tolist()
+            order = order[: args.steps_per_epoch]
+            sampler = FixedOrderSampler(order)
+            loader = DataLoader(
+                train_dataset,
+                batch_size=1,
+                sampler=sampler,
+                num_workers=args.num_workers,
+                pin_memory=device.type == "cuda",
+                generator=torch.Generator().manual_seed(args.seed + 10_000 + epoch),
+            )
+            skip_batches = first_batch if epoch == start_epoch else 0
+            first_batch = 0
+            batch_index = skip_batches - 1
+            totals: dict[str, dict[str, float]] = defaultdict(
+                lambda: defaultdict(float)
+            )
+            task_counts: dict[str, int] = defaultdict(int)
+            if epoch == start_epoch and resumed_partial:
+                for task, values in resumed_partial.get("totals", {}).items():
+                    totals[task].update(
+                        {name: float(value) for name, value in values.items()}
+                    )
+                task_counts.update(
+                    {
+                        task: int(count)
+                        for task, count in resumed_partial.get("task_counts", {}).items()
+                    }
+                )
+                resumed_partial = {}
+            for batch_index, sample in enumerate(loader):
+                if batch_index < skip_batches:
+                    continue
+                low_quality = sample.low_quality.to(device, non_blocking=True)
+                clean = sample.clean.to(device, non_blocking=True)
+                task = sample.task[0]
+                scale = int(sample.scale_factor[0])
+                active_experts = (
+                    2
+                    if args.phase == "warmup" and epoch < args.warmup_epochs
+                    else 1
+                )
+                model.dual_domain.spatial_router.active_experts = active_experts
+                model.train()
+                optimizer.zero_grad(set_to_none=True)
+                prediction, losses, details = model(
+                    low_quality,
+                    reference=clean,
+                    scale_factor=scale,
+                    return_details=True,
+                )
+                total_loss = (
+                    losses["charbonnier"]
+                    + args.gdl_weight * losses["gradient_difference"]
+                    + losses["load_balance"]
+                    + args.coherence_weight * losses["coherence"]
+                )
+                if not bool(torch.isfinite(total_loss)):
+                    raise FloatingPointError(
+                        f"non-finite loss at epoch={epoch + 1}, "
+                        f"batch={batch_index}, task={task}"
+                    )
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                global_step += 1
+                task_counts[task] += 1
+                task_totals = totals[task]
+                task_totals["loss"] += float(total_loss.detach().item())
+                for name, value in losses.items():
+                    task_totals[name] += float(value.detach().item())
+                for expert, value in enumerate(details["expert_load"]):
+                    task_totals[f"expert_load_{expert}"] += float(value.item())
+                task_totals["entropy_active_fraction"] += float(
+                    details["entropy_active_fraction"].item()
+                )
+                task_totals["entropy_mean"] += float(details["entropy_mean"].item())
+                threshold = details["entropy_threshold"]
+                if threshold is not None:
+                    task_totals["entropy_threshold"] += float(threshold.item())
+                if global_step % args.log_every_steps == 0:
+                    _append_jsonl(
+                        step_log,
+                        {
+                            "phase": args.phase,
+                            "epoch": epoch + 1,
+                            "batch": batch_index + 1,
+                            "global_step": global_step,
+                            "task": task,
+                            "scale_factor": scale,
+                            "active_experts": active_experts,
+                            "loss": float(total_loss.detach().item()),
+                            "losses": {
+                                name: float(value.detach().item())
+                                for name, value in losses.items()
+                            },
+                            "expert_load": details["expert_load"].tolist(),
+                            "entropy_active_fraction": float(
+                                details["entropy_active_fraction"].item()
+                            ),
+                            "entropy_mean": float(details["entropy_mean"].item()),
+                            "entropy_threshold": (
+                                float(details["entropy_threshold"].item())
+                                if details["entropy_threshold"] is not None
+                                else None
+                            ),
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        },
+                    )
+                if global_step % args.checkpoint_every_steps == 0:
+                    _save_checkpoint(
+                        latest_path,
+                        model,
+                        optimizer,
+                        args,
+                        epoch,
+                        batch_index + 1,
+                        global_step,
+                        history,
+                        best_psnr,
+                        training_config,
+                        {
+                            "totals": {task: dict(values) for task, values in totals.items()},
+                            "task_counts": dict(task_counts),
+                        },
+                    )
+            train_summary = {
+                task: {
+                    name: value / task_counts[task]
+                    for name, value in sums.items()
+                }
+                for task, sums in totals.items()
+            }
+            validation = _validation(
+                model,
+                validation_dataset,
+                device,
+                args.validation_samples_per_task,
+                args.seed,
+            )
+            epoch_record = {
+                "phase": args.phase,
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "active_experts": (
+                    2
+                    if args.phase == "warmup" and epoch < args.warmup_epochs
+                    else 1
+                ),
+                "training_by_task": train_summary,
+                "validation": validation,
+                "elapsed_seconds": time.monotonic() - started,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            }
+            history.append(epoch_record)
+            _write_jsonl(epoch_log, history)
+            _write_task_metrics(task_log, history)
+            print(
+                f"phase={args.phase} epoch={epoch + 1}/{args.epochs} "
+                f"step={global_step} validation_psnr={validation['mean_psnr']:.3f} "
+                f"ssim={validation['mean_ssim']:.4f} "
+                f"mu={validation['mutual_coherence_max']:.4f}",
+                flush=True,
+            )
+            if validation["mean_psnr"] > best_psnr:
+                best_psnr = validation["mean_psnr"]
+                _save_checkpoint(
+                    args.output_dir / "best.pt",
+                    model,
+                    optimizer,
+                    args,
+                    epoch + 1,
+                    0,
+                    global_step,
+                    history,
+                    best_psnr,
+                    training_config,
+                )
+            _save_checkpoint(
+                latest_path,
+                model,
+                optimizer,
+                args,
+                epoch + 1,
+                0,
+                global_step,
+                history,
+                best_psnr,
+                training_config,
+            )
+    except KeyboardInterrupt:
+        _save_checkpoint(
+            latest_path,
+            model,
+            optimizer,
+            args,
+            epoch,
+            batch_index + 1,
+            global_step,
+            history,
+            best_psnr,
+            training_config,
+            {
+                "totals": {task: dict(values) for task, values in totals.items()},
+                "task_counts": dict(task_counts),
+            },
+        )
+        print(
+            f"Interrupted safely; resume from {latest_path} with --resume.",
+            flush=True,
+        )
+        return 130
+
+    completed_status = {
+        "status": "completed",
+        "phase": args.phase,
+        "epochs_completed": int(history[-1]["epoch"]) if history else start_epoch,
+        "global_step": global_step,
+        "best_validation_psnr": best_psnr,
+        "checkpoint": str(latest_path),
+        "updated_unix": time.time(),
+    }
+    latest_checkpoint = torch.load(latest_path, map_location="cpu", weights_only=False)
+    latest_checkpoint["trainer_status"] = completed_status
+    _atomic_checkpoint(latest_path, latest_checkpoint)
+    _atomic_json(args.output_dir / "trainer_status.json", completed_status)
+    print(f"checkpoint={latest_path}")
+    print(f"metrics={epoch_log}")
+    print(f"status={args.output_dir / 'trainer_status.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

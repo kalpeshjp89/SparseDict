@@ -28,6 +28,41 @@ def test_loss_dict_return_has_all_four_paths() -> None:
         assert torch.isfinite(value)
 
 
+def test_pixel_shuffle_head_and_scale_slicing_for_all_sr_scales() -> None:
+    model = MasterMoETopKRestorer(
+        d=16, atoms_per_expert=16, top_k=4, noise_std=0.0
+    ).eval()
+    image = torch.rand(1, 3, 8, 10)
+    for scale in (2, 3, 4):
+        target = torch.rand(1, 3, 8 * scale, 10 * scale)
+        prediction, losses, details = model(
+            image,
+            reference=target,
+            scale_factor=scale,
+            return_details=True,
+        )
+        assert prediction.shape == target.shape
+        assert set(losses) == {
+            "charbonnier",
+            "gradient_difference",
+            "load_balance",
+            "coherence",
+        }
+        assert details["active_atoms_per_expert"] == 16 * scale // 4
+        assert details["expert_load"].shape == (4,)
+        assert torch.allclose(details["expert_load"].sum(), torch.tensor(1.0))
+        assert torch.isfinite(prediction).all()
+
+
+def test_same_resolution_uses_full_dictionary_slice() -> None:
+    model = MasterMoETopKRestorer(
+        d=16, atoms_per_expert=16, top_k=4, noise_std=0.0
+    ).eval()
+    image = torch.rand(1, 3, 8, 8)
+    _, _, details = model(image, return_details=True)
+    assert details["active_atoms_per_expert"] == 16
+
+
 def test_total_loss_return_and_grad_flow() -> None:
     model = MasterMoETopKRestorer(d=32, atoms_per_expert=32, top_k=8)
     image = torch.rand(2, 3, 16, 16, requires_grad=True)
@@ -40,8 +75,12 @@ def test_total_loss_return_and_grad_flow() -> None:
     gate_param_ids = {
         id(parameter) for parameter in model.entropy_gate.parameters()
     }
+    unused_scale_head_ids = {
+        id(parameter)
+        for parameter in model.super_resolution_heads.parameters()
+    }
     for parameter in model.parameters():
-        if id(parameter) in gate_param_ids:
+        if id(parameter) in gate_param_ids | unused_scale_head_ids:
             continue
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()

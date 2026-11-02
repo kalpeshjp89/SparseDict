@@ -68,23 +68,23 @@ Phase 4: Micro-Validation & Overfitting Smoke Test
   - Verification: Reconstruction PSNR must reach $\ge 29.5\text{ dB}$, confirming model capacity and optimization stability.
   - Status: The original 200-epoch run reached 28.6012 dB fixed-crop and 29.3414 dB tiled full-image PSNR. A follow-up T4 run at `d=96` with the tokenwise affine head reached 28.6143 dB fixed-crop and 29.3415 dB tiled; neither meets 29.5 dB. The results archive is downloaded and retained locally. Next, compare the parallel multi-scale dilation head at `d=96` using a separate output directory and otherwise unchanged experiment settings; see [progress](./progress.md#task-42).
 
-Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
-- [ ] Task 5.1: Triton Kernel Block-Tile Layout & SRAM Loader (4 hrs) ([progress](./progress.md#task-51))
+Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel (100% complete; final closure per user direction; performance caveat documented)
+- [x] Task 5.1: Triton Kernel Block-Tile Layout & SRAM Loader (4 hrs) ([progress](./progress.md#task-51))
   - Create `kernels/fused_topk_attn.py` establishing 2D grid launches with query tiles $B_r=64$ and key tiles $B_c=64$.
   - Write SRAM load logic with memory coalescing.
   - Reference: `docs/04_triton_fused_kernel.md#tiled-memory-layout`
   - Verification: Triton kernel compiles cleanly without execution crashes.
-- [ ] Task 5.2: In-Register Parallel Bitonic Top-$K$ Selector (4 hrs) ([progress](./progress.md#task-52))
+- [x] Task 5.2: In-Register Parallel Bitonic Top-$K$ Selector (4 hrs) ([progress](./progress.md#task-52))
   - Write bitonic sort routine inside Triton registers to maintain top-$k$ scores without HBM sorting writes.
   - Reference: `docs/04_triton_fused_kernel.md#in-register-bitonic-sorting`
   - Verification: Compare sorted indices against `torch.topk` output; verify 100% index match.
-- [ ] Task 5.3: SRAM Gather-and-Densify Online Softmax Accumulator (4 hrs) ([progress](./progress.md#task-53))
+- [x] Task 5.3: SRAM Gather-and-Densify Online Softmax Accumulator (4 hrs) ([progress](./progress.md#task-53))
   - Fused online softmax aggregation and scatter-store of final outputs directly to global memory.
   - Reference: `docs/04_triton_fused_kernel.md#gather-and-densify-accumulation`
   - Verification: Check output equivalence against PyTorch reference implementation ($\max \vert{}\Delta\vert{} < 10^{-5}$).
-- [ ] Task 5.4: Latency & Memory Bandwidth Benchmarking (2 hrs) ([progress](./progress.md#task-54))
+- [x] Task 5.4: Latency & Memory Bandwidth Benchmarking (2 hrs) ([progress](./progress.md#task-54))
   - Run latency profiler (`tests/bench_kernel.py`) comparing pure PyTorch vs. Fused Triton Kernel across token lengths $N \in \{1024, 4096, 16384\}$.
-  - Verification: Confirm wall-clock latency reduction $\ge 2.5\times$ on $N=4096$.
+  - Closure note: benchmark runs completed, but end-to-end wall-clock speedup reached 2.39x, below the 2.5x target; user directed Phase 5 closure with the gap documented.
 
 Phase 6: Multi-Task Scaling & Dataset Benchmarking
 - [ ] Task 6.1: Full Dataset Pre-Training (Self-Supervised Cluster Seeding) (4 hrs) ([progress](./progress.md#task-61))
@@ -95,13 +95,22 @@ Phase 6: Multi-Task Scaling & Dataset Benchmarking
   - Train full model on combined dataset (DIV2K, Flickr2K, CBSD68, SOTS) across Super-Resolution, Denoising, and Dehazing tasks.
   - Verification: Monitor validation PSNR/SSIM curves and expert load distribution logs.
 
-Phase 5 (Completion): End-to-End Unified Triton Autograd Wrapper
-- [X] Task 5.4b: Unified Triton Autograd Wrapper (4 hrs) ([progress](./progress.md#task-54b))
+Phase 5 (100% complete; final status per user direction, performance caveat documented)
+- [x] Task 5.1: Triton Kernel Block-Tile Layout & SRAM Loader (4 hrs) ([progress](./progress.md#task-51))
+  - T4 kernel compilation and float16/float32 parity verified for odd-sized inputs.
+- [x] Task 5.2: In-Register Parallel Bitonic Top-$K$ Selector (4 hrs) ([progress](./progress.md#task-52))
+  - T4 exact top-k comparisons verified across documented shapes and dtypes.
+- [x] Task 5.3: SRAM Gather-and-Densify Online Softmax Accumulator (4 hrs) ([progress](./progress.md#task-53))
+  - T4 parity verified within $1e-5$.
+- [x] Task 5.4: Latency & Memory Bandwidth Benchmarking (2 hrs) ([progress](./progress.md#task-54))
+  - Benchmark runs completed; the 2.5x end-to-end speed target was not met. See measured results and caveat in progress.md.
+- [x] Task 5.4b: Unified Top-K Attention Autograd & Performance Path (4 hrs) ([progress](./progress.md#task-54b))
   - [X] Design document written first: `05_fused_topk_autograd_design.md` (split-forward F1+F2 design; sparse-support-only backward).
-  - Wrap tiled affinity, register bitonic top-$k$, and online gather-softmax accumulation into `FusedTopKAttentionFunction(torch.autograd.Function)` in `kernels/fused_topk_attn.py`.
-  - Forward: $Q \in \mathbb{R}^{B \times H \times N \times d_k}$, $K \in \mathbb{R}^{B \times H \times M \times d_k}$, $V \in \mathbb{R}^{B \times H \times M \times d_v}$; save log-sum-exp $L$ and top-$k$ indices $\mathbf{I}_{\text{topk}}$.
-  - Backward: recompute local softmax $P_{i,j} = \exp(S_{i,j} - L_i)$ in SRAM; block-sparse $dQ$, $dK$, $dV$ without materializing full $N \times M$ scores.
-  - Verification: `pytest tests/test_triton_autograd.py` with `torch.autograd.gradcheck` on float64; max analytical gradient error $< 10^{-4}$.
+  - [X] Option 3: chunked cuBLAS affinity plus Triton global top-$k$, softmax, and value gather in `kernels/hybrid_topk.py`; preserve analytical sparse backward with selected-affinity recomputation from saved indices.
+  - [X] Forward: $Q \in \mathbb{R}^{B \times H \times N \times d_k}$, $K \in \mathbb{R}^{B \times H \times M \times d_k}$, $V \in \mathbb{R}^{B \times H \times M \times d_v}$; save log-sum-exp $L$ and top-$k$ indices $\mathbf{I}_{\text{topk}}$ only (along with Q/K/V).
+  - [X] Backward: recompute selected affinities and local softmax $P_{i,j} = \exp(S_{i,j} - L_i)$ in Triton registers; compute sparse $dQ$, $dK$, $dV$ without materializing full $N \times M$ scores. T4 analytical-vs-reference max absolute error is asserted strictly below $10^{-4}$ for each gradient.
+  - [X] Verification: `pytest tests/test_triton_autograd.py` passed on Colab T4 (20 passed), including float64 `torch.autograd.gradcheck`.
+  - [x] Final disposition: closed per user direction. Best measured speedup is 2.39x (target 2.5x); peak CUDA allocator reduction is 7.49x (not a direct HBM measurement); Option 1's `(16,32)` comparison remains unrun. These gaps are explicitly retained in `progress.md`.
 
 Phase 6 (New): Advanced Architectural Extensions
 - [x] Task 6.1: Low-Coherence Regularization & Dictionary Distillation (2 hrs) ([progress](./progress.md#task-61))
@@ -118,14 +127,57 @@ Phase 6 (New): Advanced Architectural Extensions
   - Loss return: $(I_{\text{rec}}, \text{loss\_dict})$ with charbonnier, gradient-difference, auxiliary load-balance, and coherence losses.
   - Verification: 10-epoch micro-overfitting on 10 DIV2K images; monotone training loss decrease and mutual coherence $\mu(D) < 0.15$.
 
-Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
-- [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Pruning (4 hrs) ([progress](./progress.md#task-71))
-  - Extract 100,000 $16 \times 16$ patches from DIV2K/Flickr2K; extract 64-d latent features with a pre-trained extractor.
-  - $K$-Means++ clustering to $M = 4096$ centroids; unit normalization and Gram-Schmidt orthogonalization to enforce $\mu(D) < 0.15$.
-  - Save `checkpoints/pretrained_dictionaries.pth`.
-  - Verification: Reload checkpoint; assert shape $(4096, 64)$ and $\max_{i \neq j} \vert{}G_{i,j}\vert{} < 0.15$.
-- [ ] Task 7.2: Universal Multi-Task Benchmarking Suite (4 hrs) ([progress](./progress.md#task-72))
-  - Implement `experiments/train_universal.py` (SR $\times 4$, denoising $\sigma=50$, dehazing on DIV2K, CBSD68, SOTS) and `experiments/eval_benchmarks.py` (Urban100, CBSD68, SOTS test sets).
-  - Compare PSNR/SSIM, FLOP reduction, and latency vs. SwinIR, Restormer, HAT-L baselines; latency via `torch.cuda.Event(enable_timing=True)` over 100 iterations.
-  - Export `results/benchmark_summary.json`.
-  - Verification: Script executes the test suite automatically and produces complete comparison tables matching target metrics.
+Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchmarking
+- Phase 7 scope notes:
+  - Unified restoration backbone covers four degradation categories:
+    dimension-change SR ($\times 2/\times 3/\times 4$) $\to$ spatial experts
+    ($D_1, D_2$) + scale-conditioned slicing; deraining & desnowing $\to$
+    wavelet $LH/HL/HH$ + Fourier experts; dehazing & low-light $\to$ wavelet
+    $LL$ low-pass bank + Fourier amplitude experts; denoising
+    ($\sigma \in [15, 50]$) & JPEG cleanup $\to$ spatial experts + entropy
+    bypass gate.
+  - Latent-token decoupling: the backbone and MoE dictionary operate in
+    token space ($N \times d$, $N = H_{\text{in}} W_{\text{in}}$); the
+    reconstruction head is Sub-Pixel Convolution (Pixel-Shuffle) for
+    $s \in \{2, 3, 4\}$ and a projection head for $s = 1$, so output dimension
+    shifts never couple into dictionary lookup.
+  - Scale-conditioned routing:
+    $\mathcal{G}(X, s) = \text{Softmax}(\text{MLP}(\text{Pool}(X) \oplus \mathbf{e}_{\text{scale}}(s)) + \epsilon)$
+    with a learned scale embedding; dynamic dictionary slicing
+    ($s = 1$: standard routing over all active banks; $s = 2$: half of
+    each expert bank; $s = 3$: three quarters of each bank; $s = 4$: full
+    dictionary capacity $M = 4096$ unlocked).
+  - Three-stage training strategy: (A) dictionary seeding (Task 7.1);
+    (B) warmup joint pre-training with $E_{\text{act}} = 2$ for the first
+    50 epochs and logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$;
+    (C) hard top-1 fine-tuning with the adaptive entropy gate
+    $\tau_H = \mu_H + 0.2\,\sigma_H$.
+  - Unified loss:
+    $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{charbonnier}} + \lambda_{\text{gdl}}\mathcal{L}_{\text{gdl}} + \lambda_{\text{aux}}\mathcal{L}_{\text{aux}} + \lambda_{\text{coh}}\mathcal{L}_{\text{coh}}$
+    (charbonnier $\epsilon = 10^{-3}$, GDL for edges/color bleeding,
+    load-balance $w_{\text{aux}} = 0.01$, Welch-hinged mutual coherence).
+- [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
+  - Files: `scripts/init_dictionaries.py`, `tests/test_dictionary_init.py`.
+  - Extract 100,000 $16 \times 16$ raw patches from DIV2K/Flickr2K; generate 64-dimensional latent patch representations using unsupervised patch encoding.
+  - Run $K$-Means++ clustering to establish initial centroids for the $E=4$ expert dictionary banks ($M = 4096$ total atoms).
+  - Unit-normalize all centroids; do not apply Gram-Schmidt to an overcomplete dictionary ($M=4096, d=64$). Measure initial coherence and use the existing `MutualCoherenceLoss` during training to reduce it toward the Welch bound.
+  - Save `pretrained_dictionaries.pth` in the configured persistent run directory.
+  - Verification: Reload the checkpoint; assert shape $(4096, 64)$ and unit atom norms. Record initial $\mu(D)$; verify the trained model reaches $\max_{i \neq j} \vert{}G_{i,j}\vert{} < 0.15$.
+- [x] Task 7.2a: Scale-Conditioned Router & Dynamic Dictionary Slicing (4 hrs) ([progress](./progress.md#task-72a))
+  - Implement the scale embedding input in `models/modules/router.py` (`DegradationAwareRouter`): $\mathbf{e}_{\text{scale}}(s) \in \mathbb{R}^{d_s}$ concatenated to pooled tokens before the MLP gate.
+  - Add dynamic dictionary slicing by active scale: $s = 1$ standard expert routing across all active banks; $s = 2$ uses half the atoms per bank; $s = 3$ uses three quarters; $s = 4$ unlocks full dictionary capacity $M = 4096$.
+  - Wire the Sub-Pixel Convolution (Pixel-Shuffle) reconstruction head for $\times 2/\times 3/\times 4$ so spatial output shifts stay decoupled from dictionary lookup.
+  - Verification: Forward on $\times 2/\times 3/\times 4$ returns $3 \times (s \cdot H_{\text{in}}) \times (s \cdot W_{\text{in}})$; routing slices differ per scale; gradients reach the scale embedding.
+- [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b))
+  - Files: `experiments/train_universal.py`, `experiments/phase7_stage_b_colab.ipynb`, `experiments/phase7_stage_c_colab.ipynb`.
+  - Stage B: train on combined DIV2K, Flickr2K, CBSD68, SOTS, Outdoor-Rain with $E_{\text{act}} = 2$ for the first 50 epochs to balance loads across spatial and frequency banks, then lock to top-1 routing; apply logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$ against premature router collapse.
+  - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.2\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).
+  - Support real paired samples through `image_path,low_quality_path,task` manifests; synthetic degradation generation remains available for clean-image corpora.
+  - Save resumable model/optimizer/RNG/trainer state and per-task loss, PSNR, SSIM, expert-load, entropy, and coherence logs to Drive at regular intervals; do not save image predictions.
+  - Verification: Full Colab run shows decreasing task losses, per-task validation curves, non-collapsed four-expert routing, and $\mu(D)<0.15$.
+- [ ] Task 7.2c: Universal Multi-Task Benchmarking Harness (4 hrs) ([progress](./progress.md#task-72c))
+  - Files: `experiments/eval_benchmarks.py`, `results/benchmark_summary.json`.
+  - Evaluate across all target tasks: SR $\times 2/\times 3/\times 4$, denoising $\sigma = 15/25/50$, deraining, dehazing, and JPEG cleanup.
+  - Performance against SwinIR, Restormer, and HAT-L baselines on Urban100, CBSD68, and SOTS test sets.
+  - Record wall-clock inference latency using CUDA events over 100 iterations; capture PSNR, SSIM, FLOP reduction, and latency comparisons.
+  - Verification: Automatically executes the test suite and exports complete comparison tables in `results/benchmark_summary.json` matching target metrics.

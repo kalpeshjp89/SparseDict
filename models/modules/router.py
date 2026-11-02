@@ -10,7 +10,11 @@ from configs import hyperparams as hp
 
 
 class DegradationAwareRouter(nn.Module):
-    """Route token features to a sparse, normalized subset of experts."""
+    """Route token features to a sparse, normalized subset of experts.
+
+    An optional integer scale factor selects a learned embedding that is
+    concatenated to pooled/token features before expert logits are produced.
+    """
 
     def __init__(
         self,
@@ -19,6 +23,7 @@ class DegradationAwareRouter(nn.Module):
         active_experts: int = 1,
         hidden_dim: int | None = None,
         noise_std: float = 0.1,
+        scale_dim: int = 16,
     ) -> None:
         super().__init__()
         self.d = int(hp.D.value if d is None else d)
@@ -26,6 +31,7 @@ class DegradationAwareRouter(nn.Module):
         self.active_experts = int(active_experts)
         self.hidden_dim = self.d if hidden_dim is None else int(hidden_dim)
         self.noise_std = float(noise_std)
+        self.scale_dim = int(scale_dim)
 
         if self.d <= 0:
             raise ValueError(f"d must be positive; got {self.d}")
@@ -40,11 +46,19 @@ class DegradationAwareRouter(nn.Module):
             raise ValueError(f"hidden_dim must be positive; got {self.hidden_dim}")
         if self.noise_std < 0:
             raise ValueError(f"noise_std must be non-negative; got {self.noise_std}")
+        if self.scale_dim <= 0:
+            raise ValueError(f"scale_dim must be positive; got {self.scale_dim}")
 
-        self.fc1 = nn.Linear(self.d, self.hidden_dim)
+        self.fc1 = nn.Linear(self.d + self.scale_dim, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.num_experts)
+        self.scale_embedding = nn.Embedding(5, self.scale_dim)
 
-    def forward(self, x: torch.Tensor, mode: str = "token") -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mode: str = "token",
+        scale_factor: int | torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Return sparse gates shaped (B, E) or (B, N, E).
 
         ``x`` is a token tensor shaped (B, N, d). In ``image`` mode tokens
@@ -61,6 +75,26 @@ class DegradationAwareRouter(nn.Module):
             features = x
         else:
             raise ValueError(f"mode must be 'image' or 'token'; got {mode!r}")
+
+        if scale_factor is not None:
+            scales = torch.as_tensor(scale_factor, device=x.device, dtype=torch.long)
+            if scales.ndim == 0:
+                scales = scales.expand(x.size(0))
+            if tuple(scales.shape) != (x.size(0),):
+                raise ValueError(
+                    f"scale_factor must be a scalar or shape ({x.size(0)},); "
+                    f"got {tuple(scales.shape)}"
+                )
+            if bool(((scales < 1) | (scales > 4)).any()):
+                raise ValueError("scale_factor values must be between 1 and 4")
+            scale_features = self.scale_embedding(scales)
+        else:
+            scale_features = features.new_zeros((x.size(0), self.scale_dim))
+        if mode == "token":
+            scale_features = scale_features.unsqueeze(1).expand(
+                -1, features.size(1), -1
+            )
+        features = torch.cat((features, scale_features), dim=-1)
 
         logits = self.fc2(F.gelu(self.fc1(features)))
         if self.training and self.noise_std > 0:

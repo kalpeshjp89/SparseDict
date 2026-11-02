@@ -62,6 +62,29 @@ def test_router_backpropagates_through_selected_gate_weights():
     assert torch.count_nonzero(router.fc2.weight.grad).item() > 0
 
 
+def test_scale_conditioning_reaches_scale_embedding():
+    router = DegradationAwareRouter(
+        d=8, num_experts=4, active_experts=2, noise_std=0.0
+    )
+    gates = router(torch.randn(2, 5, 8), scale_factor=2)
+    weights = torch.arange(1, 5, dtype=gates.dtype)
+    (gates * weights).sum().backward()
+
+    assert router.scale_embedding.weight.grad is not None
+    assert torch.count_nonzero(router.scale_embedding.weight.grad[2]).item() > 0
+
+
+def test_scale_conditioning_accepts_per_image_scales():
+    router = DegradationAwareRouter(d=8, num_experts=4, noise_std=0.0)
+    gates = router(
+        torch.randn(2, 3, 8),
+        mode="image",
+        scale_factor=torch.tensor([2, 4]),
+    )
+
+    assert gates.shape == (2, 4)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -81,3 +104,5 @@ def test_rejects_invalid_input_and_mode():
         router(torch.randn(2, 3, 7))
     with pytest.raises(ValueError, match="mode must"):
         router(torch.randn(2, 3, 8), mode="unknown")
+    with pytest.raises(ValueError, match="scale_factor values"):
+        router(torch.randn(2, 3, 8), scale_factor=5)

@@ -452,7 +452,13 @@ continuation context.
   optimization task.
 - **Last updated:** 2026-10-27
 
-## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel
+## Phase 5: Hardware-Aware Acceleration via Fused Triton Kernel — 100% Complete
+
+Phase 5 was closed per user direction (2026-11-01). All implementation,
+benchmark, and correctness work is recorded below. This completion label
+does not imply the end-to-end 2.5x speed target was achieved: the best
+measured speedup was 2.39x, and the 7.49x peak CUDA allocator reduction is
+not a direct HBM-traffic measurement.
 
 ### Task 5.1
 
@@ -540,10 +546,15 @@ continuation context.
 ### Task 5.4
 
 - **Title:** Latency & Memory Bandwidth Benchmarking
-- **Status:** Aggregation microbenchmark done (2026-10-27) and end-to-end
-  harness done (2026-11-01); the 2.5x end-to-end acceptance is **NOT met**.
-  GPU diagnosis complete; a decision on the optimization direction is
-  pending with the user.
+- **Status:** Phase 5 / Task 5.4 **closed per user direction** (2026-11-02).
+  Aggregation microbenchmark met (2026-10-27); end-to-end harness done
+  (2026-11-01) with the 2.5x e2e acceptance **NOT met** by the F1 fused
+  kernel — honest gaps are retained below. The chosen optimization path
+  was **Option 3 (hybrid cuBLAS affinity + Triton chunked top-k
+  selection/merge/aggregate)** with Option-1 honest framing; the dedicated
+  hybrid module `kernels/hybrid_topk.py` exists, and its dedicated
+  parity/e2e runs remain pending (see the partial record at the end of
+  this section). No further code changes are planned for Phase 5.
 - **Acceptance:** Benchmark PyTorch and Triton at `N={1024, 4096, 16384}` and
   show at least 2.5x latency reduction at `N=4096`.
 - **Memory target:** fused path must avoid materializing the dense `N x M`
@@ -639,19 +650,40 @@ continuation context.
 - **What works / evidence:** everything recorded above; 170 CUDA tests
   passing at commit `36331e4` (Task 5.4b remains fully green; no
   regression).
-- **Next:** user review of the four options; then implement the chosen
-  path, re-benchmark all three N values, and only then re-evaluate the
-  2.5x gate (never faked).
-- **Last updated:** 2026-11-01
+- **Closure & partial-results record (2026-11-02, per user direction):**
+  - **Closed:** Task 5.4 and Phase 5 are closed per user direction. Closure
+    does not claim the 2.5x e2e speedup gate was met; the honest measured
+    records stand:
+    - Aggregation stage alone: 3.96-4.35x (target met at the stage level).
+    - End-to-end F1 fused kernel: 0.35-0.41x vs the dense reference.
+    - Best end-to-end strategy measured in the Option 3 follow-up bench:
+      chunked PyTorch top-k with chunk 4096, **2.39x** (below the 2.5x
+      target); best peak-memory reduction 7.49x (chunk 512), with the full
+      fused path reaching ~80x lower score-memory (3.0 MiB vs 258.5 MiB at
+      `N=4096`). All numbers and their limits are in the sections above.
+  - **Code present (no further changes to be made):** the dedicated Option 3
+    module `kernels/hybrid_topk.py` (chunked cuBLAS affinity `S = Q·Kᵀ`
+    chunks, Triton per-128-column bitonic chunk-local top-k, global merge
+    kernel, delegation to the validated Phase-5.3 aggregation kernel;
+    `k == M` delegates to the fused path) plus
+    `experiments/bench_topk_strategies.py` and parity tests exist in the
+    working tree.
+  - **Pending (not blocking closure):** dedicated T4 parity checks of
+    `kernels/hybrid_topk.py` vs the reference (<= 1e-5) and a same-cell
+    e2e measurement of the pure-Triton chunked selector at
+    `N={1024, 4096, 16384}`, if the user later chooses to resume Phase 5
+    performance work.
+- **Next:** Phase 7 (Task 7.1 dictionary seeding, then 7.2a/7.2b/7.2c) per
+  the revised roadmap in todo.md.
+- **Last updated:** 2026-11-02
 
 ## Phase 6: Advanced Architectural Extensions
 
 ### Task 6.1
 
 - **Title:** Low-Coherence Regularization & Dictionary Distillation
-- **Status:** Implemented and committed earlier; all 8 local tests pass
-  (full suite 100 at the time). User validation / independent run is
-  still pending.
+- **Status:** Implemented and committed earlier; revalidated locally on
+  2026-11-01 with all 8 standalone tests passing.
 - **Relevant files:** `models/losses/coherence_loss.py`,
   `models/losses/__init__.py`, `tests/test_coherence_loss.py`
 - **Acceptance:** `MutualCoherenceLoss` must give loss `< 1e-6` on an
@@ -667,14 +699,15 @@ continuation context.
   differentiability, batched loss shape, lambda overrides, non-finite
   lambda rejection, and invalid geometry rejection including an explicit
   `welch_bound()` value check. `python -m pytest tests\test_coherence_loss.py
-  -q` passed (8 tests); full project suite passed (100 tests).
+  -q` passed (8 tests); full project suite passed (100 tests at initial
+  implementation). The requested standalone rerun passed 8/8 tests.
 - **Design note:** Welch bound uses `atom_count >= atom_dim` so the
   square-orthogonal case is representable; `atom_count < atom_dim` is
   rejected. The `M x M` Gram is materialized (64 MiB float32 at
   `M=4096`); acceptable for the phase scale.
 - **Next:** None. Integrate as `coherence_loss` in the Task 6.4 master
   restorer loss dict.
-- **Last updated:** 2026-10-28
+- **Last updated:** 2026-11-01
 
 ### Task 6.2
 
@@ -814,27 +847,27 @@ continuation context.
 ### Task 5.4b
 
 - **Title:** Unified Triton Autograd Wrapper
-- **Status:** IMPLEMENTED + T4-VALIDATED (2026-11-01). Kernel code in
-  `kernels/fused_topk_attn.py`; tests in
-  `tests/test_triton_autograd.py` (design §8 validation plan).
+- **Status:** Original F1+F2 path IMPLEMENTED + T4-VALIDATED
+  (2026-11-01); Option 3 hybrid autograd implementation and focused T4
+  correctness checks are complete. Closed per user direction on 2026-11-01;
+  performance target not met: best measured speedup is 2.39x (target >=2.5x),
+  and smallest peak allocator use is 34.5 MiB vs 258.5 MiB (7.49x, not a
+  direct HBM measure).
+  Kernel code in `kernels/fused_topk_attn.py` and
+  `kernels/hybrid_topk.py`; tests in `tests/test_triton_autograd.py` and
+  `tests/test_hybrid_topk.py`.
   Design document written first per the doc-first rule (observations.md
   #2): `05_fused_topk_autograd_design.md`.
 - **Design summary:**
-  - Split forward into F1 (new: fused tiled affinity + in-register
-    running top-k merge; writes only `(N, k)` scores + indices — never
-    the dense `N x M`) + F2 (already-validated Task 5.3 aggregate
-    kernel). Chosen over the literal single-kernel reading because
-    holding a `(B_r, d_v)` accumulator plus the `P x log^2 P` sorter
-    exceeds the register budget at master-model shapes; the split still
-    meets the Spec-04 objective of keeping the dense matrix out of HBM.
-  - Backward computes `dQ, dK, dV` exclusively on the saved sparse
-    support from `P_ij = exp(S_ij - L_i)`: B1 kernel gives exact,
-    atomic-free `dQ`; B2 kernel scatters `dK/dV` with atomic adds; the
-    standard softmax delta term uses the forward output re-dotted with
-    `dO`. No dense recompute anywhere — O(Nk) work.
-  - float64 templating included so `torch.autograd.gradcheck` runs
-    per spec (max analytic gradient error < 1e-4).
-- **Open items (flagged for review):**
+  - Float32 forward uses chunked cuBLAS GEMM affinity, chunk-local
+    candidates, and Triton global top-k + softmax + value gather.
+    Float64 keeps the Triton affinity path for gradcheck.
+  - Backward saves Q/K/V plus L and top-k indices only; Triton recomputes
+    selected affinities and softmax weights, then calculates sparse
+    `dQ/dK/dV` with an O(Nk) score-gradient temporary. No dense `N x M`
+    score or score-gradient tensor is materialized.
+  - Tiles: query block 64; key block 64, or 128 when `d_k=64`.
+- **Historical design decisions:**
   1. ~~Split-forward vs literal single-fused-forward phrasing~~
      RESOLVED 2026-10-28 (user decision): progress.md history shows the
      reference kernels were built as three separately T4-validated
@@ -842,12 +875,12 @@ continuation context.
      already pointed at a unified end-to-end path; the split design
      unifies those validated stages rather than deviating.
      Split forward is FINAL.
-  2. `B_r = 32` fallback if the `P = 128` padded sorter spills.
-- **Next:** Task 5.4 benchmarking — the fused path is now the end-to-end
-  candidate to benchmark against the reference path (fused vs
-  sparse_topk_attention latency/memory at N=4096). Design §8 step 7
-  (micro-benchmark `(B=2,H=4,N=4096,M=256,k=16)` with timing + peak
-  memory) is the natural first measurement.
+  2. Option 3 is the user's selected optimization path (2026-11-01);
+     its measured results and remaining acceptance gap are recorded below.
+- **Disposition:** Phase 5 is closed per user direction. Option 1's
+  `(16,32)` comparison remains unrun, and measured end-to-end performance
+  remains below its original threshold; reopen only if further optimization
+  is requested.
 - **Last updated:** 2026-11-01
 
 ### GPU Validation Run — Task 5.4b (Colab T4, 2026-10-29 → 2026-11-01)
@@ -874,6 +907,78 @@ continuation context.
 - **CPU suite in the same run:** 139 local tests pass unchanged
   (pure-CPU tests unaffected by the kernel work).
 
+### Task 5.4b Option 3 Follow-up (Colab T4, 2026-11-01)
+
+- **Status:** Implementation and correctness validation complete; closed
+  per user direction (2026-11-01). Performance goals remain unmet as
+  explicitly reported below; closure does not claim those thresholds passed.
+- **Selected design:** scaled chunked cuBLAS affinity, chunk-local top-k,
+  then Triton global top-k + softmax + value gather. The public autograd
+  path keeps the analytical sparse backward and applies the affinity scale
+  to `dQ`/`dK`; the float64 path remains available for gradcheck.
+- **T4 evidence (N=M=4096, k=32, d_k=d_v=64, B=H=1; CUDA events):**
+
+  | Candidate | Reference ms | Candidate ms | Speedup | Reference peak MiB | Candidate peak MiB | Parity |
+  |-----------|-------------:|-------------:|--------:|-------------------:|-------------------:|--------|
+  | Option 3, 1024 score chunks + Triton chunk sort/merge | 8.293 | 8.741 | 0.95x | 258.5 | 64.0 | pass |
+  | Option 3, 1024 chunks + CUDA local top-k + Triton merge | 8.298 | 15.443 | 0.54x | 258.5 | 36.0 | pass |
+  | Same CUDA-top-k candidate, repeat | 6.808 | 15.440 | 0.44x | 258.5 | 36.0 | pass |
+  | Single 4096-column score/top-k chunk + Triton merge | 8.292 | 20.967 | 0.40x | 258.5 | 67.0 | pass |
+
+  The best measured memory delta is ~7.2x lower than the reference (36.0
+  vs 258.5 MiB), not the requested ~75x. None of these candidates meets
+  the required 2.5x speedup. The repeated reference medians vary, so use
+  same-run comparisons and include additional controlled variants before
+  drawing a firm ranking.
+- **Correctness:** focused Colab run passed 22 tests in 6.53s for the
+  initial hybrid variant (including its Triton compile, forward parity,
+  custom autograd, and the original float64 checks).
+- **Experiment harness:** added
+  `experiments/bench_topk_strategies.py` to compare dense PyTorch reference,
+  full cuBLAS + PyTorch top-k + Triton gather, Option 3, and chunked
+  CUDA-top-k alternatives at identical shapes, with parity checks,
+  CUDA-event latency, and peak allocation. Executed on Colab Tesla T4
+  (PyTorch 2.11.0+cu130, Triton 3.6.0; 3 warmups, 3 repeats):
+
+  | Strategy | Median ms | Speedup vs. reference | Peak MiB | Max abs. error |
+  |----------|----------:|-----------------------:|---------:|---------------:|
+  | PyTorch reference | 8.2937 | 1.00x | 258.5 | 0 |
+  | Full GEMM + PyTorch top-k + Triton gather | 4.1833 | 1.98x | 128.0 | 2.384e-7 |
+  | Option 3, 1024 chunks + Triton merge | 6.8450 | 1.21x | 37.5 | 2.384e-7 |
+  | Chunked PyTorch top-k, chunk 256 | 6.5192 | 1.27x | 60.6 | 2.384e-7 |
+  | Chunked PyTorch top-k, chunk 512 | 7.5588 | 1.10x | 34.5 | 2.384e-7 |
+  | Chunked PyTorch top-k, chunk 1024 | 5.1152 | 1.62x | 37.5 | 2.384e-7 |
+  | Chunked PyTorch top-k, chunk 2048 | 3.9934 | 2.08x | 66.5 | 2.384e-7 |
+  | Chunked PyTorch top-k, chunk 4096 | 3.4741 | 2.39x | 128.0 | 2.384e-7 |
+
+  The fastest measured variant was chunked PyTorch top-k with chunk 4096
+  (2.39x), still below the 2.5x goal. The smallest measured peak allocation
+  was 34.5 MiB (7.49x below the reference), not ~75x. These are peak CUDA
+  allocator measurements, not direct HBM traffic measurements. Parity
+  passed for all candidates at the harness tolerance. The 2.5x performance
+  target remains unmet; Option 1's `(16,32)` F1 tuning was not part of this
+  run. The user directed closing Task 5.4b with this gap documented.
+- **Autograd implementation:** `FusedTopKAttentionFunction` now retains
+  only Q/K/V plus the forward log-sum-exp and top-k indices. The analytical
+  Triton backward recomputes selected affinities and softmax weights in
+  registers, and computes the softmax delta without saving the output.
+  Forward score tensors and outputs are not retained for backward.
+- **Tile alignment:** Triton query tile is 64; key tile is 64, or 128 when
+  `d_k=64`. The `ParallelDilatedAffineHead` already initializes its final
+  projection to `gamma=1`, `beta=0`; its focused identity/differentiability
+  test passed locally.
+- **Current Colab T4 validation:** `python -m pytest -q
+  tests/test_triton_autograd.py` passed **20 tests in 26.45s**, including
+  both float64 `torch.autograd.gradcheck` shapes, the saved-tensor invariant,
+  and dynamic key-tile coverage for `d_k=64`. Environment: Tesla T4,
+  torch 2.11.0+cu130, Triton 3.6.0.
+- **Gradient error gate:** the analytical-vs-reference test computes maximum
+  absolute error independently for `dQ`, `dK`, and `dV` and requires each
+  to be strictly `< 1e-4`; this assertion passed in the T4 run.
+- **Disposition:** Task 5.4b and Phase 5 are closed per user direction.
+  Do not interpret closure as evidence that the 2.5x latency target or any
+  HBM-traffic reduction target was met.
+
 ### GPU Validation Run (Colab T4, 2026-10-28)
 
 - **Status:** PASSED — the full test suite, including all 19 tests that
@@ -896,38 +1001,119 @@ continuation context.
   to the upcoming Task 5.4b fused kernel, which remains the next
   implementation item).
 
-## Phase 7: Full-Scale Multi-Task Pre-Training & Benchmarking
+## Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchmarking
+
+Phase 7 scope follows the revised roadmap in todo.md: unified restoration
+across four degradation categories (dimension-change SR x2/x3/x4,
+deraining/desnowing, dehazing/low-light, denoising/JPEG cleanup),
+latent-token decoupling with a Pixel-Shuffle reconstruction head,
+scale-conditioned routing with dynamic dictionary slicing
+($s=1 \to$ standard, $s=2 \to M_{\text{active}} = M/2$ per bank,
+$s=3 \to 3M/4$, $s=4 \to$ full $M = 4096$), three-stage training
+(A seeding / B warmup with
+$E_{\text{act}} = 2$ + logit jitter / C hard top-1 with the entropy gate),
+and the unified four-loss objective (charbonnier + GDL + auxiliary
+load-balance + Welch-hinged mutual coherence).
 
 ### Task 7.1
 
-- **Title:** K-Means++ Dictionary Seeding & Mutual Coherence Pruning
-- **Status:** Not started.
-- **Acceptance:** Seed `E=4` expert dictionaries from 100,000 `16x16`
-  DIV2K/Flickr2K patch embeddings with K-Means++ (M=4096), enforce
-  `mu(D) < 0.15` via unit normalization and Gram-Schmidt, and save
-  `checkpoints/pretrained_dictionaries.pth`; reload and assert shape
-  `(4096, 64)` with `max_{i != j} |G_ij| < 0.15`.
-- **What works / evidence:** Not implemented.
-- **What did not / blockers:** Depends on dataset access and the 64-d
-  feature extractor choice; superseded the original Phase 6.1 which
-  targeted ImageNet embeddings.
-- **Next:** After Task 6.2-6.4 land, confirm dataset availability and the
-  feature extractor, then implement `scripts/init_dictionaries.py`.
-- **Last updated:** 2026-10-28
+- **Title:** K-Means++ Dictionary Seeding & Mutual Coherence Regularization
+- **Status:** Implemented; full-scale Colab run and trained coherence
+  acceptance pending.
+- **Files:** `scripts/init_dictionaries.py`,
+  `experiments/phase7_stage_a_colab.ipynb`,
+  `tests/test_dictionary_init.py`.
+- **Acceptance:** Seed `E=4` banks from 100,000 `16x16` DIV2K/Flickr2K
+  embeddings with K-Means++ (`M=4096,d=64`), unit-normalize the atoms,
+  record initial coherence, then verify Stage B/C coherence regularization
+  reaches `max_{i != j} |G_ij| < 0.15`. Gram-Schmidt is intentionally
+  excluded because the dictionary is overcomplete.
+- **What works / evidence:** Added a trainable patch autoencoder, patch
+  extraction, chunked K-Means++/Lloyd updates, normalized four-bank output,
+  initial coherence/Welch reporting, and encoder optimizer/RNG checkpoints.
+  The Stage A CPU smoke run seeded `(32,16)` atoms and reported
+  `mu=1.0000`; this intentionally records rather than rejects an initial
+  value above the target.
+- **What did not / blockers:** The 100,000-patch, `(4096,64)` Colab run has
+  not been executed. The tiny smoke run does not demonstrate the trained
+  `mu<0.15` criterion.
+- **Next:** Run Stage A on the configured licensed datasets and verify the
+  persisted `(4096,64)` artifact and initial coherence report.
+- **Last updated:** 2026-11-02
 
-### Task 7.2
+### Task 7.2a
 
-- **Title:** Universal Multi-Task Benchmarking Suite
+- **Title:** Scale-Conditioned Router & Dynamic Dictionary Slicing
+- **Status:** Implemented; targeted CPU tests pass.
+- **Acceptance:** Scale embedding `e_scale(s)` concatenated to pooled
+  tokens in `DegradationAwareRouter`; dynamic dictionary slicing
+  (`s=1` full, `s=2` half, `s=3` three-quarter, `s=4` full); Pixel-Shuffle
+  reconstruction for x2/x3/x4. The four-way scale-conditioned router
+  selects among spatial, wavelet, and Fourier expert banks.
+- **What works / evidence:** Implemented scale embeddings, four-expert
+  routing, per-scale atom slicing, and Pixel-Shuffle heads. Targeted
+  forward/gradient tests verify output dimensions at x2/x3/x4 and gradients
+  reaching the scale embedding.
+- **Next:** Validate scale-conditioned behavior on Colab inputs and confirm
+  expert usage with the Stage B load logs.
+- **Last updated:** 2026-11-02
+
+### Task 7.2b
+
+- **Title:** Universal Multi-Task Pre-Training
+- **Status:** Training workflow implemented; full Colab training pending.
+- **Files:** `experiments/train_universal.py`,
+  `data/universal_loader.py`, `scripts/make_universal_manifest.py`,
+  `experiments/phase7_stage_b_colab.ipynb`,
+  `experiments/phase7_stage_c_colab.ipynb`.
+- **Acceptance:** Stage B combined-training warmup (DIV2K, Flickr2K,
+  CBSD68, SOTS, Outdoor-Rain) with `E_act = 2` for the first 50 epochs and
+  logit jitter `N(0, 0.1^2)`; Stage C hard top-1 fine-tuning with the
+  adaptive entropy gate `tau_H = mu_H + 0.2 * sigma_H` under the unified
+  multi-task loss. Verification: monotone training-loss decrease across
+  tasks, logged PSNR/SSIM validation curves, and no collapsed expert in
+  the load distribution.
+- **What works / evidence:** Added deterministic task manifests and paired
+  synthetic degradation patches (SR x2/x3/x4, denoising, rain, snow, haze,
+  low-light, JPEG), Stage B two-expert/jitter warmup, Stage C strict top-1
+  without jitter, and the unified four-term loss. Atomic Drive-compatible
+  checkpoints include model, optimizer, RNG, epoch/batch position, partial
+  epoch aggregates, configuration and manifest fingerprints. JSONL/CSV
+  records include per-task losses, PSNR/SSIM/L1, four-expert loads, entropy,
+  learning rate, and coherence. The Colab notebooks use 100 training steps
+  per epoch and 8 validation samples per task by default to limit session
+  runtime; both values are configurable. Each notebook clones the repository's
+  `master` branch (or fast-forward updates an existing Colab clone), and the
+  default DIV2K location is on Drive so data survives a terminated runtime.
+  The final focused regression set
+  passed (61 tests). Notebook JSON/code and script CLI syntax checks passed.
+  A CPU end-to-end smoke run completed Stage A, interrupted Stage B after
+  step 1 and resumed it at step 1 to complete step 2, then completed Stage C.
+  Checkpoint, status, step, epoch, and per-task log files were verified.
+- **What did not / blockers:** Full Colab training and convergence,
+  no-collapsed-expert, and `mu<0.15` acceptance are unverified. DIV2K
+  download is wired to the existing licensed downloader; Flickr2K, CBSD68,
+  SOTS and Outdoor-Rain directories remain optional mounted inputs. The
+  default workflow synthesizes degradations from clean images; real paired
+  examples can be added with `image_path,low_quality_path,task` CSV rows,
+  but dataset acquisition and pair-list preparation remain user-configured.
+- **Next:** Run Stage B/C in Colab with Drive-mounted datasets; inspect
+  per-task curves and coherence before treating the model as trained.
+- **Last updated:** 2026-11-02
+
+### Task 7.2c
+
+- **Title:** Universal Multi-Task Benchmarking Harness
 - **Status:** Not started.
-- **Acceptance:** Multi-task training (SR x4, denoising sigma=50,
-  dehazing) on DIV2K/CBSD68/SOTS with evaluation on Urban100/CBSD68/SOTS,
-  baseline comparison against SwinIR, Restormer, and HAT-L, latency via
-  CUDA events over 100 iterations, and structured
-  `results/benchmark_summary.json`.
+- **Files:** `experiments/eval_benchmarks.py`, `results/benchmark_summary.json`.
+- **Acceptance:** Evaluate SR x2/x3/x4, denoising sigma=15/25/50,
+  deraining, dehazing, and JPEG cleanup; compare against SwinIR, Restormer,
+  and HAT-L on Urban100/CBSD68/SOTS; record latency via CUDA events over
+  100 iterations; export PSNR, SSIM, FLOP reduction, and latency
+  comparisons to `results/benchmark_summary.json` executed automatically
+  by the test suite.
 - **What works / evidence:** Not implemented.
-- **What did not / blockers:** Depends on the Task 6.4 master model,
-  dataset pipelines, and target-GPU access; consolidates the original
-  Phase 6.2 universal training task.
-- **Next:** After Task 6.4, write `experiments/train_universal.py` and
-  `experiments/eval_benchmarks.py`.
-- **Last updated:** 2026-10-28
+- **What did not / blockers:** Depends on Task 7.2b trained checkpoints
+  and target-GPU access.
+- **Next:** After Task 7.2b, write the evaluation harness.
+- **Last updated:** 2026-11-02

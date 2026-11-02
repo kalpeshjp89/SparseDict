@@ -7,8 +7,10 @@ document is the plan of record for implementing
 doc-first rule adopted after the rushed-draft failures of Task 5.4b
 preparation (observations.md #2).
 
-Status: DESIGN FINALIZED (2026-10-28, user confirmed) — split forward
-(F1 + F2) is the plan of record. Kernel implementation may start.
+Status: DESIGN UPDATED (2026-11-01) — the original split F1+F2 design was
+implemented and T4-validated. The user selected Option 3 (hybrid cuBLAS
+affinity + Triton top-k gather-softmax) for the next implementation pass;
+its latency and memory targets remain pending fresh T4 measurements.
 
 Decision history: the user asked to check progress against the literal
 "one fused forward" phrasing before finalizing. progress.md shows the
@@ -22,6 +24,16 @@ rather than deviating from them: F1 adds the only fusion not yet built
 reuses the accepted Task 5.3 aggregate kernel unchanged. The literal
 single-kernel variant is possible only for small `d_v <= 32` and is a
 deferred non-goal, not a change of plan.
+
+Implementation update (Option 3): for float32, affinity is computed with
+chunked cuBLAS GEMMs scaled by `1 / (tau * sqrt(d_k))`. Triton reduces each
+score chunk to local top-k candidates; the final
+`fused_topk_gather_softmax_kernel` globally selects from those candidates,
+computes the stable top-k softmax, gathers values, and writes the output.
+The existing sparse analytical backward consumes the final saved support,
+with the affinity scale applied to `dQ` and `dK`. Float64 retains the
+original path for gradcheck. Chunked scores are still written to HBM, so
+the 75x memory target is not presumed; it requires benchmark evidence.
 
 ---
 
@@ -147,6 +159,8 @@ leaves registers.
 ≈ 64 x 128 fp32 sort array dominates (~32 KB); with `num_warps=8` this
 fits SRAM/registers; if compile shows spills, fallback constants:
 `B_r = 32` (grid doubles, merging unchanged). Tuning knob recorded.
+The implemented Triton query tile is `B_r = 64`; affinity key tiles use
+`B_c = 64`, increased to `128` when `d_k = 64`.
 
 ---
 
@@ -161,10 +175,12 @@ per 32-logit block, accumulate `(N, d_v)` in fp32. Already validated
 
 ## 6. Backward Design (new kernels, sparse support only)
 
-Saved tensors: `Q, K, V, top_scores, top_indices, L (N,)` where
-`L_i = m_i + log(sum_j exp(S_ij - m_i))` over the k selected (natural
-log; computed in F2-adjacent helper or a tiny kernel — decision: compute
-in python from `top_scores` (k is small) before backward; saves a kernel).
+Saved tensors: `Q, K, V, top_indices, L (N,)`. The selected scores are
+used to compute `L_i = m_i + log(sum_j exp(S_ij - m_i))` over the k
+selected logits during forward, then discarded. Backward recomputes
+selected affinities from `Q`, `K`, and `top_indices`, and evaluates
+`P = exp(S - L)` in Triton registers. The forward output is not retained:
+B1 computes `delta_i = sum_j P_ij (dO_i · V_j)` directly.
 
 Downstream: `O_i = sum_j P_ij V_j`, `P_ij = exp(S_ij - L_i)` (renormalized
 softmax restricted to the top-k support — identical semantics to the
@@ -180,26 +196,25 @@ dK_j   += dS_ij Q_i                  (scatter, atomics across query rows)
 dV_j   += P_ij dO_i                  (scatter, atomics across query rows)
 ```
 
-All three gradients use ONLY saved top-k pairs. No dense S recompute is
-needed anywhere — the spec's "recompute local softmax P = exp(S - L)"
-is satisfied: we recompute P from the SAVED `(N, k)` scores via exp in
-SRAM, and the GEMMs are block-sparse gathers.
+All three gradients use only saved top-k indices. Selected scores are
+recomputed from gathered `Q` and `K`, then `P` and `G` are evaluated in
+registers; no dense `N x M` score or score-gradient tensor is materialized.
 
 ### Kernel B1: dQ (per query block)
 Grid `(ceil(N / B_r), B*H)`; per query row i, loop over k in `k-block`
 chunks (16):
-- load `I (chunk)` indices, `S (chunk)` saved scores, `P = exp(S - L_i)`
-- `G = (B_r, kc, d_v-chunk)` gather-dotted against `dO`: partial dots
-  over `d_v` feature chunks accumulate a `(B_r, kc)` scalar; second pass
-  computes `dS`; third pass gathers `K[I] (`B_r, kc, f`-chunks)` and
-  weighted-sums into `dQ (B_r, f)` accumulator — registers
+- load `I (chunk)` indices, recompute `S = Q · K[I] / (tau sqrt(d_k))`,
+  then evaluate `P = exp(S - L_i)`
+- gather-dot `V[I]` with `dO` to compute `G`; first pass accumulates
+  `delta_i = sum_j P_ij G_ij`, second pass writes `dS`, and third pass
+  gathers `K[I]` and weighted-sums into `dQ` — registers
   `64 x 32 x [kc=16] = 32k` loads per chunk, `(B_r, f)=2048` fp32
   accumulator — fits.
 No atomics; exact deterministic writes.
 
 ### Kernel B2: dK/dV (per query block, atomic scatter)
 Grid `(ceil(N / B_r), B*H)`; per program:
-- recompute `P` and `dS` exactly as in B1 (same helper math),
+- recompute selected `S` from `Q`, `K`, and `I`, then `P = exp(S-L)`;
 - `atomic_add` into `dV[I] += P * dO` and `dK[I] += dS * Q` via gathered
   row pointers `dV_ptr + I[:, None] * d_v + f[None, :]`.
 Atomic fp32 (fp64 for gradcheck; CUDA fp64 atomics are supported, slow
@@ -207,13 +222,10 @@ but tiny shapes). Deterministic per-run ordering is not guaranteed
 across query blocks — the resulting ±1-2 ulp wobble is orders below the
 1e-4 gradcheck target, and we validate with fixed seeds.
 
-Note: `delta_i` (= dot(dO_i, O_i)) requires O_i — recomputed cheaply in
-python before backward launches: `O` is already computed in forward;
-pass it as a saved tensor. (Cheaper than multiplying P·dO through a
-kernel, and exact.)
-
 ### Zero-traffic accounting (vs dense backward)
-- Saved-from-forward reads: `(N,k)` scores + indices + `L`: O(Nk).
+- Saved-from-forward tensors: Q, K, V, `(N,k)` indices, and `(N,)` L;
+  no selected-score or output tensor is retained.
+- Backward temporary: sparse `(N,k)` `dS`: O(Nk).
 - B1 reads: `dO (N, d_v)`, gathered `K`, `V` rows O(Nk d).
 - B2 reads: same atomic-scatter sources; writes hits only touched atoms.
 - Never reads or writes `N x M` anywhere. Spec requirement satisfied.
@@ -226,7 +238,7 @@ kernel, and exact.)
 class FusedTopKAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, k):          # returns (B,H,N,d_v) fp32 accum
-        # flatten B*H, launch F1, F2; ctx.save Q,K,V,I,S,L? (O not needed: delta = dot(dO,O) recomputed via O saved)
+        # flatten B*H, launch F1/F2; save only Q,K,V,I,L for backward
     @staticmethod
     def backward(ctx, dO):                 # launch B1 (dQ) + B2 (dK,dV)
 

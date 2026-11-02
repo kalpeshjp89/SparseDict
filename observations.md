@@ -1,10 +1,12 @@
 ﻿# Engineering Observations Log (SparseDict)
 
-Accumulated issues / observations recorded during Tasks 5.4b preparation, 6.1-6.3.
+Accumulated issues / observations recorded during Tasks 5.4b, 6.1-6.3.
 Keep this file updated as new observations arise.
 
 ## Kernel and roadmap (Task 5.4b)
-1. Task 5.4b is the only remaining Phase-5 item; progress.md has no 5.4b record yet.
+1. The original Task 5.4b F1+F2 autograd path passed T4 validation on
+   2026-11-01. The user selected Option 3 as the follow-up optimization;
+   the required latency and memory targets remain unmet.
 2. The unified fused kernel needs a FlashAttention-style design: one fused forward
    (tiled affinity + in-register bitonic top-k merge + gathered online softmax) and
    an analytical recompute backward that never materializes the dense N x M score
@@ -164,12 +166,12 @@ Keep this file updated as new observations arise.
     scoping: variables assigned inside a `for` loop are not visible
     after it unless pre-declared before the loop (hit twice:
     `NameError('big is not defined')`).
-34. (Pending user decision, Task 5.4.) Four options recorded in
-    progress.md: (a) rescope with honest gap at `(16,32)` + exact
-    threshold-skip of the sort (~1.1-1.5x expected); (b) two-phase
-    redesign of F1 selection with degenerate-row fallback (potential
-    ~1.5-2 ms, needs Phase-A affinity tuning from 3.36 toward ~1 ms);
-    (c) cuBLAS affinity inside the fused path with chunked writes
-    (~3.4-4.4 ms estimated from measured components); (d) keep current
-    F1, deliver the memory win, and revise the acceptance with sign-off.
-    Implementation of the chosen option not started.
+34. (Decision resolved, Task 5.4b, 2026-11-01.) User selected Option 3:
+    cuBLAS affinity with chunked writes and Triton top-k softmax-gather.
+    The controlled T4 strategy sweep (N=M=4096, k=32, d_k=d_v=64) found
+    the fastest candidate was chunked PyTorch top-k with chunk 4096 at
+    3.4741 ms vs 8.2937 ms reference (2.39x); the 2.5x target remains unmet.
+    The lowest peak allocator use was 34.5 vs 258.5 MiB (7.49x), not ~75x,
+    and is not a direct HBM traffic measurement. All measured candidates
+    passed parity at max absolute error <=2.384e-7. Option 1's (16,32) F1
+    tuning was not included and remains unmeasured.

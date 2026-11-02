@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.modules.router import DegradationAwareRouter
 from models.modules.topk_select import sparse_topk_attention
@@ -63,8 +64,9 @@ class DualDomainMoEDictionary(nn.Module):
     Expert banks: 0 and 1 hold spatial edge and texture atoms, expert 2 holds
     wavelet low-pass (``LL``) structural atoms, and expert 3 holds
     high-frequency atoms applied to a Fourier-domain pathway built from the
-    amplitude spectrum. Branch outputs are reconstructed with the inverse
-    transforms and combined by channel-gated ``1x1`` convolution fusion.
+    amplitude spectrum. A scale-conditioned four-way router selects active
+    banks; branch outputs are reconstructed with the inverse transforms and
+    combined by channel-gated ``1x1`` convolution fusion.
     """
 
     def __init__(
@@ -97,7 +99,7 @@ class DualDomainMoEDictionary(nn.Module):
         )
         self.spatial_router = DegradationAwareRouter(
             d=self.channels,
-            num_experts=2,
+            num_experts=4,
             active_experts=1,
             noise_std=noise_std,
         )
@@ -169,7 +171,10 @@ class DualDomainMoEDictionary(nn.Module):
         return result.output
 
     def forward(
-        self, feature_map: torch.Tensor, return_gates: bool = False
+        self,
+        feature_map: torch.Tensor,
+        return_gates: bool = False,
+        scale_factor: int = 1,
     ):
         if feature_map.ndim != 4:
             raise ValueError(
@@ -187,34 +192,64 @@ class DualDomainMoEDictionary(nn.Module):
                 "spatial dimensions must be even and at least two; got "
                 f"({height}, {width})"
             )
+        if scale_factor not in (1, 2, 3, 4):
+            raise ValueError(
+                f"scale_factor must be one of 1, 2, 3, or 4; got {scale_factor}"
+            )
+
+        if scale_factor == 2:
+            active_atoms = max(1, self.atoms_per_expert // 2)
+        elif scale_factor == 3:
+            active_atoms = max(1, (3 * self.atoms_per_expert) // 4)
+        else:
+            active_atoms = self.atoms_per_expert
 
         # --- Spatial pathway: routed mixture of the two edge/texture banks. ---
         tokens = feature_map.flatten(2).transpose(1, 2)
-        spatial_bank = self.dictionary[:2]
-        gates = self.spatial_router(tokens, mode="token")
+        spatial_bank = self.dictionary[:2, :active_atoms]
+        gates = self.spatial_router(
+            tokens, mode="token", scale_factor=scale_factor
+        )
+        spatial_gates = gates[..., :2]
+        has_spatial_route = spatial_gates.sum(dim=-1, keepdim=True) > 0
+        fallback_gates = torch.zeros_like(spatial_gates)
+        fallback_gates[..., 0] = 1
+        safe_spatial_gates = torch.where(
+            has_spatial_route, spatial_gates, fallback_gates
+        )
         sp_tokens = self._mixture(
             tokens,
             branch=0,
             bank=spatial_bank,
-            top_k=min(self.top_k, 2 * self.atoms_per_expert),
-            gates=gates,
+            top_k=min(self.top_k, 2 * active_atoms),
+            gates=safe_spatial_gates,
         )
         sp_map = sp_tokens.transpose(1, 2).reshape(batch, channels, height, width)
+        sp_map = sp_map * has_spatial_route.transpose(1, 2).reshape(
+            batch, 1, height, width
+        )
 
         # --- Wavelet pathway: attention over the LL subband structure. ---
         ll, lh, hl, hh = haar_dwt2(feature_map)
         ll_tokens = ll.flatten(2).transpose(1, 2)
-        low_bank = self.dictionary[2:3]
+        low_bank = self.dictionary[2:3, :active_atoms]
         ll_tokens_out = self._mixture(
             ll_tokens,
             branch=1,
             bank=low_bank,
-            top_k=min(self.top_k, self.atoms_per_expert),
+            top_k=min(self.top_k, active_atoms),
         )
         ll_map = ll_tokens_out.transpose(1, 2).reshape(
             batch, channels, height // 2, width // 2
         )
         wave_map = haar_idwt2(ll_map, lh, hl, hh)
+        gate_map = gates.transpose(1, 2).reshape(batch, 4, height, width)
+        wave_gate = F.adaptive_avg_pool2d(
+            gate_map[:, 2:3], (height // 2, width // 2)
+        )
+        wave_map = wave_map * F.interpolate(
+            wave_gate, size=(height, width), mode="nearest"
+        )
 
         # --- Fourier pathway: attention over amplitude spectrum tokens. ---
         spectrum = torch.fft.rfft2(feature_map, norm="backward")
@@ -223,16 +258,23 @@ class DualDomainMoEDictionary(nn.Module):
         )
         phase = torch.atan2(spectrum.imag, spectrum.real)  # fixed carrier
         spec_tokens = amplitude.flatten(2).transpose(1, 2)
-        high_bank = self.dictionary[3:4]
+        high_bank = self.dictionary[3:4, :active_atoms]
         amp_tokens_out = self._mixture(
             spec_tokens,
             branch=2,
             bank=high_bank,
-            top_k=min(self.top_k, self.atoms_per_expert),
+            top_k=min(self.top_k, active_atoms),
         )
         amp_map = amp_tokens_out.transpose(1, 2).reshape(
             batch, channels, height, width // 2 + 1
         )
+        fourier_gate = F.interpolate(
+            gate_map[:, 3:4],
+            size=(height, width // 2 + 1),
+            mode="bilinear",
+            align_corners=False,
+        )
+        amp_map = amp_map * fourier_gate
         fourier_spectrum = torch.polar(amp_map, phase)
         fourier_map = torch.fft.irfft2(
             fourier_spectrum, s=(height, width), norm="backward"

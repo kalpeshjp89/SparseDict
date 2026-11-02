@@ -6,6 +6,8 @@ standard skip-if pattern; the CPU tests run everywhere and cover the
 wrapper's fail-fast validation.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -40,7 +42,7 @@ def _dense_scores(queries, keys):
 
 
 def _reference_output(queries, keys, values, k, selection="hard"):
-    scores = _dense_scores(queries, keys)
+    scores = _dense_scores(queries, keys) / math.sqrt(queries.shape[-1])
     return sparse_topk_attention(scores, values, k, selection=selection).output
 
 
@@ -109,6 +111,30 @@ def test_gradcheck_fp64(n, m, k, dk, dv):
     )
 
 
+@requires_cuda
+def test_forward_saves_inputs_support_indices_and_lse_only():
+    queries, keys, values = _seeded_inputs(1, 1, 8, 12, 4, 3, dtype=torch.float64)
+    queries.requires_grad_()
+    keys.requires_grad_()
+    values.requires_grad_()
+    saved = []
+
+    def pack_tensor(tensor):
+        saved.append((tuple(tensor.shape), tensor.dtype))
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack_tensor, lambda tensor: tensor):
+        fused_topk_attention(queries, keys, values, 5)
+
+    assert saved == [
+        ((1, 8, 4), torch.float64),
+        ((1, 12, 4), torch.float64),
+        ((1, 12, 3), torch.float64),
+        ((1, 8, 5), torch.int32),
+        ((1, 8), torch.float64),
+    ]
+
+
 # --- analytical backward vs autograd-of-reference ----------------------------
 
 
@@ -132,7 +158,7 @@ def test_backward_matches_reference_autograd_fp64():
     ref_queries = queries.detach().clone().requires_grad_(True)
     ref_keys = keys.detach().clone().requires_grad_(True)
     ref_values = values.detach().clone().requires_grad_(True)
-    ref_scores = _dense_scores(ref_queries, ref_keys)
+    ref_scores = _dense_scores(ref_queries, ref_keys) / math.sqrt(dk)
     ref_out = sparse_topk_attention(ref_scores, ref_values, k).output
     ref_q, ref_k, ref_v = torch.autograd.grad(
         (ref_out * weights).sum(), (ref_queries, ref_keys, ref_values)
@@ -155,6 +181,14 @@ def test_full_width_k_equals_m_fp32():
     queries, keys, values = _seeded_inputs(1, 1, 32, 32, 8, 5)
     actual = fused_topk_attention(queries, keys, values, 32)
     expected = _reference_output(queries, keys, values, 32)
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=0.0)
+
+
+@requires_cuda
+def test_dynamic_key_tile_for_64_dimensional_head():
+    queries, keys, values = _seeded_inputs(1, 1, 64, 1, 64, 3)
+    actual = fused_topk_attention(queries, keys, values, 1)
+    expected = _reference_output(queries, keys, values, 1)
     assert torch.allclose(actual, expected, atol=1e-5, rtol=0.0)
 
 

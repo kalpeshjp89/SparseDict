@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import statistics
 import sys
@@ -24,7 +25,7 @@ def _torch_reference(
     k: int,
 ) -> torch.Tensor:
     """Materialize dense scores, run top-k, softmax, and gather in PyTorch."""
-    scores = queries @ keys.transpose(-2, -1)
+    scores = (queries @ keys.transpose(-2, -1)) / math.sqrt(queries.shape[-1])
     return sparse_topk_attention(scores, values, k).output
 
 
@@ -160,9 +161,9 @@ def benchmark(
         "python": platform.python_version(),
         "triton": __import__("triton").__version__,
         "operation": (
-            "end-to-end sparse top-k attention: affinity + top-k select + "
-            "softmax aggregate; PyTorch reference materializes the dense "
-            "N x M score matrix, the fused Triton path never does"
+            "end-to-end sparse top-k attention: chunked cuBLAS affinity, "
+            "chunk-local CUDA top-k, and fused Triton global top-k softmax-gather; "
+            "PyTorch reference materializes the dense N x M score matrix"
         ),
         "timing": "CUDA events; warmups excluded; median of three repeated batches",
         "memory": "torch.cuda.max_memory_allocated delta over one forward",
