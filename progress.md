@@ -1085,6 +1085,15 @@ load-balance + Welch-hinged mutual coherence).
   runtime; both values are configurable. Each notebook clones the repository's
   `master` branch (or fast-forward updates an existing Colab clone), and the
   default DIV2K location is on Drive so data survives a terminated runtime.
+  Added `scripts/prepare_phase7_datasets.py` to download/resume public DIV2K,
+  Flickr2K, CBSD68, and optional Urban100 archives into Drive, reuse existing
+  Drive folders, extract archives supplied from Drive or shared file IDs, and
+  accept authorized direct HTTPS URLs for datasets without a verified direct
+  source. The notebooks wire this into Stage A (DIV2K/Flickr2K) and Stages B/C
+  (DIV2K/Flickr2K/CBSD68/SOTS/Outdoor-Rain); Urban100 is an optional Stage C
+  benchmark dataset. SOTS and Outdoor-Rain still require a user-authorized
+  URL/Drive source; the roadmap does not identify a unique Outdoor-Rain
+  corpus. Clean/GT folders are selected rather than hazy/rainy inputs.
   The final focused regression set
   passed (61 tests). Notebook JSON/code and script CLI syntax checks passed.
   A CPU end-to-end smoke run completed Stage A, interrupted Stage B after

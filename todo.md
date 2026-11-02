@@ -157,7 +157,7 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
     (charbonnier $\epsilon = 10^{-3}$, GDL for edges/color bleeding,
     load-balance $w_{\text{aux}} = 0.01$, Welch-hinged mutual coherence).
 - [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
-  - Files: `scripts/init_dictionaries.py`, `tests/test_dictionary_init.py`.
+  - Files: `scripts/init_dictionaries.py`, `scripts/prepare_phase7_datasets.py`, `tests/test_dictionary_init.py`.
   - Extract 100,000 $16 \times 16$ raw patches from DIV2K/Flickr2K; generate 64-dimensional latent patch representations using unsupervised patch encoding.
   - Run $K$-Means++ clustering to establish initial centroids for the $E=4$ expert dictionary banks ($M = 4096$ total atoms).
   - Unit-normalize all centroids; do not apply Gram-Schmidt to an overcomplete dictionary ($M=4096, d=64$). Measure initial coherence and use the existing `MutualCoherenceLoss` during training to reduce it toward the Welch bound.
@@ -169,10 +169,11 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
   - Wire the Sub-Pixel Convolution (Pixel-Shuffle) reconstruction head for $\times 2/\times 3/\times 4$ so spatial output shifts stay decoupled from dictionary lookup.
   - Verification: Forward on $\times 2/\times 3/\times 4$ returns $3 \times (s \cdot H_{\text{in}}) \times (s \cdot W_{\text{in}})$; routing slices differ per scale; gradients reach the scale embedding.
 - [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b))
-  - Files: `experiments/train_universal.py`, `experiments/phase7_stage_b_colab.ipynb`, `experiments/phase7_stage_c_colab.ipynb`.
+  - Files: `scripts/prepare_phase7_datasets.py`, `experiments/train_universal.py`, `experiments/phase7_stage_b_colab.ipynb`, `experiments/phase7_stage_c_colab.ipynb`.
   - Stage B: train on combined DIV2K, Flickr2K, CBSD68, SOTS, Outdoor-Rain with $E_{\text{act}} = 2$ for the first 50 epochs to balance loads across spatial and frequency banks, then lock to top-1 routing; apply logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$ against premature router collapse.
   - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.2\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).
   - Support real paired samples through `image_path,low_quality_path,task` manifests; synthetic degradation generation remains available for clean-image corpora.
+  - Dataset setup downloads/resumes public DIV2K, Flickr2K, and CBSD68 archives where accessible, reuses extracted Drive folders, and accepts Drive archive paths/file IDs or authorized HTTPS archive URLs. SOTS and the underspecified Outdoor-Rain corpus require a user-authorized Drive/source configuration. Stage C can optionally acquire Urban100 for later benchmarking.
   - Save resumable model/optimizer/RNG/trainer state and per-task loss, PSNR, SSIM, expert-load, entropy, and coherence logs to Drive at regular intervals; do not save image predictions.
   - Verification: Full Colab run shows decreasing task losses, per-task validation curves, non-collapsed four-expert routing, and $\mu(D)<0.15$.
 - [ ] Task 7.2c: Universal Multi-Task Benchmarking Harness (4 hrs) ([progress](./progress.md#task-72c))
