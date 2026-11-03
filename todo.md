@@ -169,7 +169,7 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
   - Add dynamic dictionary slicing by active scale: $s = 1$ standard expert routing across all active banks; $s = 2$ uses half the atoms per bank; $s = 3$ uses three quarters; $s = 4$ unlocks full dictionary capacity $M = 4096$.
   - Wire the Sub-Pixel Convolution (Pixel-Shuffle) reconstruction head for $\times 2/\times 3/\times 4$ so spatial output shifts stay decoupled from dictionary lookup.
   - Verification: Forward on $\times 2/\times 3/\times 4$ returns $3 \times (s \cdot H_{\text{in}}) \times (s \cdot W_{\text{in}})$; routing slices differ per scale; gradients reach the scale embedding.
-- [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b))
+- [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b)) (Stage B warmup completed on Colab T4 2026-11-03: val PSNR 26.10, SSIM 0.79; mu(D)=0.9959 vs <0.15 gate - Stage C coherence decision pending)
   - Files: `scripts/prepare_phase7_datasets.py`, `experiments/train_universal.py`, `experiments/phase7_stage_b_colab.ipynb`, `experiments/phase7_stage_c_colab.ipynb`.
   - Stage B: train on combined DIV2K, Flickr2K, CBSD68, SOTS, Outdoor-Rain with $E_{\text{act}} = 2$ for the first 50 epochs to balance loads across spatial and frequency banks, then lock to top-1 routing; apply logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$ against premature router collapse.
   - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.2\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).

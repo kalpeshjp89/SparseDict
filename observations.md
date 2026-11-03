@@ -217,3 +217,19 @@ Keep this file updated as new observations arise.
     `image_path,low_quality_path,task` CSV manifest rows (input/target
     layout), and Colab free disk (~200 GB on standard runtimes) still
     requires the one-corpus-at-a-time sharding flow for Flickr2K.
+
+37. (Stage B session facts, 2026-11-03.) Colab T4 run completed 50 warmup
+    epochs (5,000 steps), val PSNR 24.21->26.10, SSIM 0.714->0.793. Facts kept
+    for future sessions: (a) Rain13K exact size 2.53 GB / 36,021 files (HF tree
+    API). (b) patch 192 OOMs (18 GiB single backward allocation, ~patch^2);
+    144 + expandable_segments works; batch is already 1 (loader hardwired).
+    (c) This Colab runtime does not surface child-process stdout; the train
+    cell captures child output and prints tails (kept). (d) Kaggle credentials
+    cell now skips itself when SOTS already exists so Run-all never stalls on
+    getpass. (e) Keep-alive interval injected into the Colab page (60 s)
+    mitigates idle disconnects, not free-tier usage limits. (f) FLOPs measured
+    locally via scripts/measure_flops.py (torch.profiler, torch path):
+    ~8.7 GFLOPs forward per patch-144 step across all scales (output_size
+    interpolates LR patches up to 144 before the backbone), est. ~26 GFLOPs
+    per step including backward, ~130 TFLOPs per 50-epoch warmup; custom
+    fused kernels are excluded by design. Op mix: mm/conv2d/bmm dominate.

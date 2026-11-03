@@ -1089,6 +1089,15 @@ load-balance + Welch-hinged mutual coherence).
 
 - **Title:** Universal Multi-Task Pre-Training
 - **Status:** Training workflow implemented; full Colab training pending.
+- **Stage B warmup run (Colab T4, 2026-11-03):** completed 50/50 epochs /
+  5,000 steps; val PSNR 24.21 -> 26.10 dB, SSIM 0.714 -> 0.793, decreasing task
+  losses; Stage A checkpoint loaded clean;
+  latest.pt/metrics.jsonl/metrics_by_task.csv/trainer_status.json written under
+  phase7/stage_b/. Session fixes: patch 192 OOM (single ~18 GiB backward
+  allocation) -> patch 144 + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True;
+  checkpoint interval 100 -> 25 for cheap session-chain resumes; this Colab
+  runtime hides child-process stdout, so the notebook train cell captures child
+  output and prints stderr tails (kept for future runs).
 - **Files:** `experiments/train_universal.py`,
   `data/universal_loader.py`, `scripts/make_universal_manifest.py`,
   `experiments/phase7_stage_b_colab.ipynb`,
@@ -1138,7 +1147,13 @@ load-balance + Welch-hinged mutual coherence).
   step 1 and resumed it at step 1 to complete step 2, then completed Stage C.
   Checkpoint, status, step, epoch, and per-task log files were verified.
 - **What did not / blockers:** Full Colab training and convergence,
-  no-collapsed-expert, and `mu<0.15` acceptance are unverified. DIV2K
+  no-collapsed-expert, and `mu<0.15` acceptance PARTIALLY VERIFIED (2026-11-03): training ran and converged on the
+    compiled metric set, but the coherence gate is OPEN - logged mu(D) moved
+    only 0.9998 -> 0.9959 across 5,000 warmup steps, far above the mu<0.15
+    target (Welch floor for a 4096x64 frame ~0.124), so closing the gate needs
+    an explicit Stage C decision (stronger coherence pressure or a revised
+    gate), not more warmup steps. Expert-load distribution reads fine in
+    metrics_by_task.csv. DIV2K
   download is wired to the existing licensed downloader; Flickr2K, CBSD68,
   SOTS and Outdoor-Rain directories remain optional mounted inputs. The
   default workflow synthesizes degradations from clean images; real paired
