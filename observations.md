@@ -233,3 +233,5 @@ Keep this file updated as new observations arise.
     interpolates LR patches up to 144 before the backbone), est. ~26 GFLOPs
     per step including backward, ~130 TFLOPs per 50-epoch warmup; custom
     fused kernels are excluded by design. Op mix: mm/conv2d/bmm dominate.
+
+38. (Drive web-UI empty-folder illusion, 2026-11-03.) After an interrupted drive.flush_and_unmount(), the Drive web UI showed phase7/stage_b empty across repeated hard reloads and title searches while the files existed server-side; a fresh drive.mount('/content/drive', force_remount=True) in the same session listed them immediately (best.pt 5.38 MB, latest.pt 5.39, metrics.jsonl 0.34, metrics_by_task.csv 0.26, steps.jsonl 0.28, train.csv 13.78, validation.csv 1.53, trainer_status.json ~0). Lessons: (a) trust kernel-side os.listdir over the Drive web UI when judging persistence; (b) an interrupted flush_and_unmount leaves the mount torn down (MyDrive path ENOENT) but deletes nothing on the server; (c) force_remount=True restores access in-session without data loss.
