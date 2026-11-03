@@ -1121,6 +1121,17 @@ load-balance + Welch-hinged mutual coherence).
   benchmark dataset. SOTS and Outdoor-Rain still require a user-authorized
   URL/Drive source; the roadmap does not identify a unique Outdoor-Rain
   corpus. Clean/GT folders are selected rather than hazy/rainy inputs.
+  Notebook update (2026-11-03): Stage B/C notebooks gained a masked
+  Kaggle-credentials cell (`phase7-b/c-kaggle-token`) inserted after setup
+  that prompts for username + API key via getpass (or preloaded Colab
+  Secrets `KAGGLE_USERNAME`/`KAGGLE_API_KEY`), writes `~/.kaggle/kaggle.json`
+  with 0600 permissions, auto-installs the Kaggle CLI, and validates auth
+  against the SOTS dataset listing; credentials are never stored in the
+  notebook file. Acquisition cells now default to the one-corpus-at-a-time
+  order `cbsd68 -> sots -> outdoor-rain -> div2k` with the selected
+  `kaggle:` SOTS and `hf-dataset:` Rain13K sources wired in as defaults
+  (flickr2k/urban100 opt-in), and the manifest cells append additional
+  SOTS gt/clear halves (indoor and outdoor) to the clean-training set.
   The final focused regression set
   passed (61 tests). Notebook JSON/code and script CLI syntax checks passed.
   A CPU end-to-end smoke run completed Stage A, interrupted Stage B after
