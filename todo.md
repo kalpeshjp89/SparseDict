@@ -156,13 +156,14 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
     $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{charbonnier}} + \lambda_{\text{gdl}}\mathcal{L}_{\text{gdl}} + \lambda_{\text{aux}}\mathcal{L}_{\text{aux}} + \lambda_{\text{coh}}\mathcal{L}_{\text{coh}}$
     (charbonnier $\epsilon = 10^{-3}$, GDL for edges/color bleeding,
     load-balance $w_{\text{aux}} = 0.01$, Welch-hinged mutual coherence).
-- [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
+- [x] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
   - Files: `scripts/init_dictionaries.py`, `scripts/prepare_phase7_datasets.py`, `tests/test_dictionary_init.py`.
   - Extract 100,000 $16 \times 16$ raw patches from DIV2K/Flickr2K; generate 64-dimensional latent patch representations using unsupervised patch encoding.
   - Run $K$-Means++ clustering to establish initial centroids for the $E=4$ expert dictionary banks ($M = 4096$ total atoms).
   - Unit-normalize all centroids; do not apply Gram-Schmidt to an overcomplete dictionary ($M=4096, d=64$). Measure initial coherence and use the existing `MutualCoherenceLoss` during training to reduce it toward the Welch bound.
   - Save `pretrained_dictionaries.pth` in the configured persistent run directory.
   - Verification: Reload the checkpoint; assert shape $(4096, 64)$ and unit atom norms. Record initial $\mu(D)$; verify the trained model reaches $\max_{i \neq j} \vert{}G_{i,j}\vert{} < 0.15$.
+  - Status (2026-11-02): Stage A run completed on Colab. Encoder trained 3 epochs / 1,173 steps (reconstruction loss $0.0750 \to \sim$0.007); K-Means++ completed; checkpoint saved to Drive `phase7/stage_a/pretrained_dictionaries.pth` with shape $(4096, 64)$ from 100,000 patches / 800 source images. Initial coherence measured $\mu(D) = 0.99982$ (target $< 0.15$ NOT met at initialization — expected for clustered natural patches); the $< 0.15$ acceptance moves to the Stage B/C trained dictionary via `MutualCoherenceLoss`. Independent checkpoint reload-assert still pending.
 - [x] Task 7.2a: Scale-Conditioned Router & Dynamic Dictionary Slicing (4 hrs) ([progress](./progress.md#task-72a))
   - Implement the scale embedding input in `models/modules/router.py` (`DegradationAwareRouter`): $\mathbf{e}_{\text{scale}}(s) \in \mathbb{R}^{d_s}$ concatenated to pooled tokens before the MLP gate.
   - Add dynamic dictionary slicing by active scale: $s = 1$ standard expert routing across all active banks; $s = 2$ uses half the atoms per bank; $s = 3$ uses three quarters; $s = 4$ unlocks full dictionary capacity $M = 4096$.
@@ -173,7 +174,7 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
   - Stage B: train on combined DIV2K, Flickr2K, CBSD68, SOTS, Outdoor-Rain with $E_{\text{act}} = 2$ for the first 50 epochs to balance loads across spatial and frequency banks, then lock to top-1 routing; apply logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$ against premature router collapse.
   - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.2\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).
   - Support real paired samples through `image_path,low_quality_path,task` manifests; synthetic degradation generation remains available for clean-image corpora.
-  - Dataset setup downloads/resumes public DIV2K, Flickr2K, and CBSD68 archives where accessible, reuses extracted Drive folders, and accepts Drive archive paths/file IDs or authorized HTTPS archive URLs. SOTS and the underspecified Outdoor-Rain corpus require a user-authorized Drive/source configuration. Stage C can optionally acquire Urban100 for later benchmarking.
+  - Dataset setup downloads/resumes public DIV2K (ETH), Flickr2K (HuggingFace `yangtao9009` HR zip), and CBSD68 (GitHub) archives where accessible, reuses extracted Drive folders, and accepts Drive archive paths/file IDs, authorized HTTPS archive URLs, `kaggle:owner/slug` sources (SOTS via Kaggle `balraj98`), and `hf-dataset:repo_id` spread repositories (Outdoor-Rain/deraining via HF `dronefreak/Rain13K`). Urban100 for Stage C comes from HF `eugenesiow` (129 MB HR tar.gz). Stage C can optionally acquire Urban100 for later benchmarking.
   - Save resumable model/optimizer/RNG/trainer state and per-task loss, PSNR, SSIM, expert-load, entropy, and coherence logs to Drive at regular intervals; do not save image predictions.
   - Verification: Full Colab run shows decreasing task losses, per-task validation curves, non-collapsed four-expert routing, and $\mu(D)<0.15$.
 - [ ] Task 7.2c: Universal Multi-Task Benchmarking Harness (4 hrs) ([progress](./progress.md#task-72c))

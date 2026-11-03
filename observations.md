@@ -175,3 +175,45 @@ Keep this file updated as new observations arise.
     and is not a direct HBM traffic measurement. All measured candidates
     passed parity at max absolute error <=2.384e-7. Option 1's (16,32) F1
     tuning was not included and remains unmeasured.
+
+35. (Dataset source flakiness, Task 7.2b, 2026-11-03.) The built-in
+    `cv.snu.ac.kr/research/EDSR` host used by
+    `scripts/prepare_phase7_datasets.py` for Flickr2K/Urban100 is dead
+    (curl: connection refused / 21 s timeout, no response) - a known
+    recurring outage for that host. CBSD68 (GitHub clausmichele master
+    zip, 200 OK) and DIV2K (ETH `data.vision.ee.ethz.ch`, train-HR zip
+    200 OK at 3.28 GB) are healthy. Verified alternates: Flickr2K
+    HR-only zip via Hugging Face `yangtao9009/Flickr2K` resolve URL
+    (10.85 GB, 200 OK; HR-only suffices since Stage B synthesizes
+    degradations from clean HR images; also mirrored on Kaggle
+    `duyminhle/flickr2k` 21.5 GB with HR+LR); Urban100 via HF
+    `eugenesiow/Urban100` raw `Urban100_HR.tar.gz` (129 MB, 200 OK;
+    official source page github.com/jbhuang0604/SelfExSR links a 1.14 GB
+    copy). SOTS: official RESIDE page offers Dropbox links that require
+    a working bit.ly hop; Kaggle mirror `balraj98/
+    synthetic-objective-testing-set-sots-reside` (436 MB, indoor+outdoor
+    GT/hazy) is simpler on Colab. Deraining/Outdoor-Rain training pairs:
+    Rain13K composite mirror `dronefreak/Rain13K` on HF (13,711
+    input/target pairs, standard MPRNet/Restormer protocol); Kaggle
+    JRDR (2.2 GB) and `darun04/de-raining` (899 MB) also exist. Kaggle
+    mirrors require the user's `kaggle.json` on Colab (assistant must
+    not handle credentials); the HF resolve links work directly through
+    the script's existing `--source-url` HTTPS path.
+
+36. (Decision resolved, Task 7.2b sources, 2026-11-03.) User selected:
+    Flickr2K -> HF `yangtao9009/Flickr2K` HR zip (10.85 GB); SOTS ->
+    Kaggle `balraj98/synthetic-objective-testing-set-sots-reside`;
+    deraining/Outdoor-Rain -> HF `dronefreak/Rain13K` (spread repo -
+    the HF repo has no single zip, only train/ and test/ per-image
+    trees, so it needs snapshot_download, not a resolve URL); Urban100
+    -> HF `eugenesiow/Urban100` HR tar.gz (129 MB). Implemented in
+    `scripts/prepare_phase7_datasets.py`: dead cv.snu.ac.kr URLs
+    replaced in PUBLIC_DATASET_URLS and two `--source-url` schemes added
+    (`kaggle:<owner>/<slug>` via the Kaggle CLI, `hf-dataset:<repo_id>`
+    via huggingface_hub.snapshot_download). Kaggle credentials remain
+    user-supplied (kaggle.json on Colab); the script never touches them.
+    Focused tests 10/10; full suite 173 passed / 36 skipped locally.
+    Remaining risk: Rain13K real pairs must be turned into
+    `image_path,low_quality_path,task` CSV manifest rows (input/target
+    layout), and Colab free disk (~200 GB on standard runtimes) still
+    requires the one-corpus-at-a-time sharding flow for Flickr2K.

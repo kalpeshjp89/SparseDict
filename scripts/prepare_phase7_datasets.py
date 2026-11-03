@@ -20,13 +20,33 @@ if str(ROOT) not in sys.path:
 
 
 PUBLIC_DATASET_URLS = {
-    "flickr2k": "https://cv.snu.ac.kr/research/EDSR/Flickr2K.tar",
+    # cv.snu.ac.kr (EDSR host) is intermittently dead; the Flickr2K HR-only
+    # zip on Hugging Face mirrors the same 2650 HR images (~10.85 GB) plus
+    # LR folders and is sufficient because degradations are synthesized
+    # from clean images.
+    "flickr2k": (
+        "https://huggingface.co/datasets/yangtao9009/Flickr2K/"
+        "resolve/main/Flickr2K.zip"
+    ),
     "cbsd68": (
         "https://github.com/clausmichele/CBSD68-dataset/"
         "archive/refs/heads/master.zip"
     ),
-    "urban100": "https://cv.snu.ac.kr/research/EDSR/Urban100.tar",
+    # Original SNU-hosted Urban100.tar is unreachable; the Hugging Face
+    # raw copy holds the 100 HR images (129 MB) used for benchmarking.
+    "urban100": (
+        "https://huggingface.co/datasets/eugenesiow/Urban100/"
+        "resolve/main/data/Urban100_HR.tar.gz"
+    ),
 }
+# Source-URL schemes accepted in --source-url in addition to direct
+# HTTPS archive links:
+#   kaggle:<owner>/<slug>     -> `kaggle datasets download` (requires the
+#                                user's kaggle.json credentials on the host)
+#   hf-dataset:<repo_id>      -> huggingface_hub.snapshot_download for
+#                                spread (per-image) dataset repositories
+KAGGLE_SCHEME = "kaggle:"
+HF_DATASET_SCHEME = "hf-dataset:"
 DATASET_NAMES = {
     "div2k": "DIV2K",
     "flickr2k": "Flickr2K",
@@ -109,6 +129,57 @@ def _download_google_drive(file_id: str, archive: Path) -> Path:
             "the file is accessible to this Colab account."
         )
     return archive
+
+
+def _download_kaggle(slug: str, destination: Path) -> None:
+    """Download a Kaggle dataset archive with the Kaggle CLI.
+
+    ``kaggle`` credentials must already be configured by the user on the
+    host (``~/.kaggle/kaggle.json`` or the ``KAGGLE_USERNAME``/
+    ``KAGGLE_KEY`` environment variables); this helper never handles the
+    credentials itself.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    command = [
+        "kaggle",
+        "datasets",
+        "download",
+        "-d",
+        slug,
+        "-p",
+        str(destination),
+        "--unzip",
+        "-o",
+    ]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True)
+    except FileNotFoundError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "kaggle"], check=True)
+        completed = subprocess.run(command, check=False, capture_output=True)
+    if completed.returncode != 0:
+        detail = completed.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            f"kaggle datasets download failed for {slug!r}: "
+            f"{detail or completed.returncode}"
+        )
+
+
+def _download_hf_dataset(repo_id: str, destination: Path) -> None:
+    """Download a spread Hugging Face dataset repository in-place."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "huggingface_hub"],
+            check=True,
+        )
+        from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=str(destination),
+    )
 
 
 def _safe_destination(root: Path, member_name: str) -> Path:
@@ -292,8 +363,17 @@ def prepare_dataset(
         archive = root / "_archives" / f"{name}.download"
         _download_google_drive(drive_file_ids[key], archive)
     elif key in source_urls:
-        archive = _download_resumable(source_urls[key], archive.with_suffix(
-            Path(source_urls[key].split("?", maxsplit=1)[0]).suffix or ".archive"
+        source = source_urls[key]
+        if source.startswith(KAGGLE_SCHEME):
+            _download_kaggle(source[len(KAGGLE_SCHEME) :], dataset_root)
+            return _resolve_clean_image_dir(key, dataset_root)
+        if source.startswith(HF_DATASET_SCHEME):
+            _download_hf_dataset(
+                source[len(HF_DATASET_SCHEME) :], dataset_root
+            )
+            return _resolve_clean_image_dir(key, dataset_root)
+        archive = _download_resumable(source, archive.with_suffix(
+            Path(source.split("?", maxsplit=1)[0]).suffix or ".archive"
         ))
     elif download_public and key in PUBLIC_DATASET_URLS:
         url = PUBLIC_DATASET_URLS[key]
@@ -338,7 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="DATASET=URL",
-        help="Authorized direct HTTPS archive URL for a dataset.",
+        help=(
+            "Authorized direct HTTPS archive URL, `kaggle:owner/slug`, or "
+            "`hf-dataset:repo_id` for a dataset."
+        ),
     )
     parser.add_argument(
         "--drive-file-id",

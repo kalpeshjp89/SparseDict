@@ -1018,8 +1018,12 @@ load-balance + Welch-hinged mutual coherence).
 ### Task 7.1
 
 - **Title:** K-Means++ Dictionary Seeding & Mutual Coherence Regularization
-- **Status:** Implemented; full-scale Colab run and trained coherence
-  acceptance pending.
+- **Status:** Full-scale Stage A run completed by the user on Colab
+  (2026-11-02; artifacts archived from `stage_a-20261102T111810Z`).
+  Checkpoint shape acceptance met; coherence acceptance is explicitly
+  **not met at initialization** (mu = 0.99982 vs < 0.15) and, per the
+  adopted design, must be closed by Stage B/C coherence regularization —
+  pending trained-model verification.
 - **Files:** `scripts/init_dictionaries.py`,
   `experiments/phase7_stage_a_colab.ipynb`,
   `tests/test_dictionary_init.py`.
@@ -1034,12 +1038,35 @@ load-balance + Welch-hinged mutual coherence).
   The Stage A CPU smoke run seeded `(32,16)` atoms and reported
   `mu=1.0000`; this intentionally records rather than rejects an initial
   value above the target.
-- **What did not / blockers:** The 100,000-patch, `(4096,64)` Colab run has
-  not been executed. The tiny smoke run does not demonstrate the trained
-  `mu<0.15` criterion.
-- **Next:** Run Stage A on the configured licensed datasets and verify the
-  persisted `(4096,64)` artifact and initial coherence report.
-- **Last updated:** 2026-11-02
+- **Full-scale Stage A results (user-run Colab, from `stage_a` JSON
+  logs, 2026-11-02):**
+  - `encoder_status.json` = `encoder_complete`: 3 epochs, 1,173 steps;
+    `encoder_steps.jsonl` shows reconstruction loss falling ~10x overall
+    (0.0750 at step 10 -> ~0.0067-0.0075 in the final
+    epochs/steps ~1,140-1,173), no NaNs or blowups.
+  - `kmeans_status.json` = `completed` (phase `complete`).
+  - `dictionary_metrics.json`: checkpoint saved to
+    `/content/drive/MyDrive/SparseDict/phase7/stage_a/pretrained_dictionaries.pth`;
+    shape `(4096, 64)` ✓; 100,000 patches from 800 source images; Welch
+    bound 0.12403; `maximum_initial_coherence` = **0.99982** ->
+    `target_met_at_initialization: false`,
+    `coherence_regularization_required: true`.
+  - Interpretation: K-Means++ centroids of natural-image patches are
+    strongly correlated; unit normalization + the current re-normalization
+    cannot reach mu < 0.15 at initialization on clustered real data. This
+    is recorded, not papered over. The closure path is the one the run
+    itself flags: coherence regularization (`MutualCoherenceLoss`,
+    Task 6.1) during Stage B/C must drive the trained dictionary's
+    coherence below 0.15 for full acceptance.
+- **What did not / blockers:** Trained-coherence acceptance remains open
+  (needs Stage B/C training logs recomputing `mu(D)`); an independent
+  second-path reload-and-assert of the Drive checkpoint (shape + coherence
+  recompute) has not been executed; the `.pth` lives only on the user's
+  Drive, not in the repo.
+- **Next:** Task 7.2b Stage B run with the seeded dictionary initialized
+  from the Drive checkpoint; recompute `max_{i != j} |G_ij|` on the
+  trained dictionary to close the < 0.15 acceptance.
+- **Last updated:** 2026-11-03
 
 ### Task 7.2a
 
@@ -1106,8 +1133,45 @@ load-balance + Welch-hinged mutual coherence).
   default workflow synthesizes degradations from clean images; real paired
   examples can be added with `image_path,low_quality_path,task` CSV rows,
   but dataset acquisition and pair-list preparation remain user-configured.
-- **Next:** Run Stage B/C in Colab with Drive-mounted datasets; inspect
-  per-task curves and coherence before treating the model as trained.
+  Added blocker (2026-11-03): the user's Colab/Drive storage cannot hold
+  the full multi-corpus image set at once; the Stage B dataset strategy is
+  "one corpus at a time" per runtime — options under review are
+  (a) download -> shard to compact uint8 patch archives -> delete source
+  archives, repeated per corpus, with the manifest filtered to whatever
+  shards exist; (b) full datasets on a paid/larger Drive and mounting at
+  runtime; (c) skip Flickr2K entirely (largest corpus, ~20 GB) and run
+  Stage B on DIV2K + CBSD68 + SOTS + Outdoor-Rain only. Checkpoint/resume
+  support already in place means training can continue across sessions
+  with different mounted datasets.
+  Source-URL status check (2026-11-03): the built-in
+  `cv.snu.ac.kr/research/EDSR` host for Flickr2K/Urban100 is dead
+  (connection refused / timeout, verified); CBSD68 (GitHub) and DIV2K
+  (`data.vision.ee.ethz.ch`, 3.28 GB train HR zip verified 200 OK)
+  respond fine. Verified replacements: Flickr2K HR-only zip on Hugging
+  Face (`yangtao9009/Flickr2K`, 10.85 GB, 200 OK; HR-only is sufficient
+  because Stage B synthesizes degradations from clean images) and
+  Urban100 HR tar.gz on Hugging Face (`eugenesiow/Urban100`, 129 MB,
+  200 OK); SOTS and dehazing/deraining training pairs have verified
+  Kaggle mirrors (balraj98 SOTS RESIDE 436 MB; Rain13K HF mirror
+  `dronefreak/Rain13K` for deraining pairs) but require Kaggle API
+  credentials or a user-mounted copy. Resolution (2026-11-03, user
+  selected): Flickr2K -> HF `yangtao9009` zip; SOTS -> Kaggle `balraj98`
+  mirror; deraining/Outdoor-Rain -> HF `dronefreak/Rain13K` (spread
+  repo, needs `hf-dataset:` scheme, no single zip); Urban100 ->
+  HF `eugenesiow` tar.gz. Implementation: dead SNU host URLs replaced in
+  `PUBLIC_DATASET_URLS` (flickr2k -> HF zip, urban100 -> HF tar.gz) and
+  two new `--source-url` schemes added — `kaggle:<owner>/<slug>` (shells
+  out to `kaggle datasets download`; credentials stay user-supplied on
+  Colab) and `hf-dataset:<repo_id>` (`huggingface_hub.snapshot_download`
+  for spread repositories). Local checks: focused dataset-prepare tests
+  10/10, full suite 173 passed / 36 skipped. Pending user actions: place
+  `kaggle.json` on Colab for the SOTS path; for Rain13K, real pairs come
+  from its input/target layout via the existing CSV manifest support
+  (clean-side training via the `target` dir resolution also works).
+- **Next:** Commit + push, then on Colab (a) pull, (b) run the one-corpus-
+  at-a-time shard/prepare flow (CBSD68 -> SOTS -> Outdoor-Rain -> DIV2K,
+  skip Flickr2K until storage allows), (c) run Stage B with Drive-mounted
+  shards, and inspect per-task curves and coherence.
 - **Last updated:** 2026-11-02
 
 ### Task 7.2c
