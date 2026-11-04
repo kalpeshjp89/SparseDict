@@ -151,33 +151,37 @@ Phase 7: Full-Scale Multi-Task Pre-Training, Scale-Conditioned Routing & Benchma
     (B) warmup joint pre-training with $E_{\text{act}} = 2$ for the first
     50 epochs and logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$;
     (C) hard top-1 fine-tuning with the adaptive entropy gate
-    $\tau_H = \mu_H + 0.2\,\sigma_H$.
+    $\tau_H = \mu_H + 0.1\,\sigma_H$.
   - Unified loss:
     $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{charbonnier}} + \lambda_{\text{gdl}}\mathcal{L}_{\text{gdl}} + \lambda_{\text{aux}}\mathcal{L}_{\text{aux}} + \lambda_{\text{coh}}\mathcal{L}_{\text{coh}}$
     (charbonnier $\epsilon = 10^{-3}$, GDL for edges/color bleeding,
     load-balance $w_{\text{aux}} = 0.01$, Welch-hinged mutual coherence).
-- [x] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
+- [ ] Task 7.1: $K$-Means++ Dictionary Seeding & Mutual Coherence Regularization (4 hrs) ([progress](./progress.md#task-71))
   - Files: `scripts/init_dictionaries.py`, `scripts/prepare_phase7_datasets.py`, `tests/test_dictionary_init.py`.
   - Extract 100,000 $16 \times 16$ raw patches from DIV2K/Flickr2K; generate 64-dimensional latent patch representations using unsupervised patch encoding.
   - Run $K$-Means++ clustering to establish initial centroids for the $E=4$ expert dictionary banks ($M = 4096$ total atoms).
   - Unit-normalize all centroids; do not apply Gram-Schmidt to an overcomplete dictionary ($M=4096, d=64$). Measure initial coherence and use the existing `MutualCoherenceLoss` during training to reduce it toward the Welch bound.
   - Save `pretrained_dictionaries.pth` in the configured persistent run directory.
   - Verification: Reload the checkpoint; assert shape $(4096, 64)$ and unit atom norms. Record initial $\mu(D)$; verify the trained model reaches $\max_{i \neq j} \vert{}G_{i,j}\vert{} < 0.15$.
-  - Status (2026-11-02): Stage A run completed on Colab. Encoder trained 3 epochs / 1,173 steps (reconstruction loss $0.0750 \to \sim$0.007); K-Means++ completed; checkpoint saved to Drive `phase7/stage_a/pretrained_dictionaries.pth` with shape $(4096, 64)$ from 100,000 patches / 800 source images. Initial coherence measured $\mu(D) = 0.99982$ (target $< 0.15$ NOT met at initialization — expected for clustered natural patches); the $< 0.15$ acceptance moves to the Stage B/C trained dictionary via `MutualCoherenceLoss`. Independent checkpoint reload-assert still pending.
+- **Status (2026-11-04):** Stage A completed on Colab; Stage C ran to completion, but its final trained coherence is $\mu(D)=0.994454$, so the required $<0.15$ acceptance is not met. The Stage A checkpoint reload-and-norm assertion is also not independently verified. Keep this task open; see [progress](./progress.md#task-71).
+- Coherence follow-up implementation: `scripts/warmup_coherence.py` now optimizes only the full, globally measured dictionary using `MutualCoherenceLoss`, Adam with `weight_decay=0`, and a strict $\mu(D)<0.20$ gate (up to 1,000 steps by default). This warmup and the retrain have not yet been run on the seeded Drive checkpoint.
 - [x] Task 7.2a: Scale-Conditioned Router & Dynamic Dictionary Slicing (4 hrs) ([progress](./progress.md#task-72a))
   - Implement the scale embedding input in `models/modules/router.py` (`DegradationAwareRouter`): $\mathbf{e}_{\text{scale}}(s) \in \mathbb{R}^{d_s}$ concatenated to pooled tokens before the MLP gate.
   - Add dynamic dictionary slicing by active scale: $s = 1$ standard expert routing across all active banks; $s = 2$ uses half the atoms per bank; $s = 3$ uses three quarters; $s = 4$ unlocks full dictionary capacity $M = 4096$.
   - Wire the Sub-Pixel Convolution (Pixel-Shuffle) reconstruction head for $\times 2/\times 3/\times 4$ so spatial output shifts stay decoupled from dictionary lookup.
   - Verification: Forward on $\times 2/\times 3/\times 4$ returns $3 \times (s \cdot H_{\text{in}}) \times (s \cdot W_{\text{in}})$; routing slices differ per scale; gradients reach the scale embedding.
-- [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b)) (Stage B warmup completed on Colab T4 2026-11-03: val PSNR 26.10, SSIM 0.79; mu(D)=0.9959 vs <0.15 gate - Stage C coherence decision pending)
+- [ ] Task 7.2b: Universal Multi-Task Pre-Training (4 hrs) ([progress](./progress.md#task-72b)) (Stage B warmup completed 2026-11-03; Stage C completed 20/20 epochs / 2,000 steps on 2026-11-04. Final mean val PSNR/SSIM 25.048/0.7864; best PSNR 25.393 at epoch 7; final $\mu(D)=0.994454$, failing the $<0.15$ gate. All four experts received validation load, but load was imbalanced. Task remains open for failed coherence gate and review of per-task regressions.)
   - Files: `scripts/prepare_phase7_datasets.py`, `experiments/train_universal.py`, `experiments/phase7_stage_b_colab.ipynb`, `experiments/phase7_stage_c_colab.ipynb`.
   - Stage B: train on combined DIV2K, Flickr2K, CBSD68, SOTS, Outdoor-Rain with $E_{\text{act}} = 2$ for the first 50 epochs to balance loads across spatial and frequency banks, then lock to top-1 routing; apply logit jitter $\epsilon \sim \mathcal{N}(0, 0.1^2)$ against premature router collapse.
-  - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.2\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).
+  - Stage C: fine-tune full parameters under the unified multi-task loss with strict top-1 expert paths and adaptive entropy-gate thresholding ($\tau_H = \mu_H + 0.1\,\sigma_H$) to bypass dictionary attention on low-complexity regions (flat background, sky).
+  - Before retraining, run `scripts/warmup_coherence.py` on the Stage A dictionary (up to 1,000 dictionary-only steps, zero dictionary weight decay) and require $\mu(D)<0.20$. Then initialize from the Stage B model checkpoint and override only its dictionary with the warmed checkpoint.
+  - Retraining controls: dictionary optimizer group has `weight_decay=0`; coherence weight is `1e-3`; Charbonnier loss is divided by each task's epoch-1 mean; apply $\sigma=0.1$ router jitter for the first 500 fine-tune steps; use $\kappa=0.1$; raise auxiliary weight from 0.01 to 0.05 on batches where any expert load exceeds 45%.
   - Support real paired samples through `image_path,low_quality_path,task` manifests; synthetic degradation generation remains available for clean-image corpora.
   - Dataset setup downloads/resumes public DIV2K (ETH), Flickr2K (HuggingFace `yangtao9009` HR zip), and CBSD68 (GitHub) archives where accessible, reuses extracted Drive folders, and accepts Drive archive paths/file IDs, authorized HTTPS archive URLs, `kaggle:owner/slug` sources (SOTS via Kaggle `balraj98`), and `hf-dataset:repo_id` spread repositories (Outdoor-Rain/deraining via HF `dronefreak/Rain13K`). Urban100 for Stage C comes from HF `eugenesiow` (129 MB HR tar.gz). Stage C can optionally acquire Urban100 for later benchmarking.
   - Save resumable model/optimizer/RNG/trainer state and per-task loss, PSNR, SSIM, expert-load, entropy, and coherence logs to Drive at regular intervals; do not save image predictions.
   - Verification: Full Colab run shows decreasing task losses, per-task validation curves, non-collapsed four-expert routing, and $\mu(D)<0.15$.
-- [ ] Task 7.2c: Universal Multi-Task Benchmarking Harness (4 hrs) ([progress](./progress.md#task-72c))
+  - Rerun verification is strict: final checkpoint $\mu(D)<0.15$ and non-decreasing PSNR and SSIM for every task at every validation epoch. The trainer records an acceptance report and returns nonzero if either gate fails. Keep prior artifacts intact in a new run directory; do not mark complete based on epoch completion alone.
+- [ ] Task 7.2c: Universal Multi-Task Benchmarking Harness (4 hrs) ([progress](./progress.md#task-72c)) (Blocked until Task 7.2b produces an accepted final checkpoint and baseline model implementations/weights are available.)
   - Files: `experiments/eval_benchmarks.py`, `results/benchmark_summary.json`.
   - Evaluate across all target tasks: SR $\times 2/\times 3/\times 4$, denoising $\sigma = 15/25/50$, deraining, dehazing, and JPEG cleanup.
   - Performance against SwinIR, Restormer, and HAT-L baselines on Urban100, CBSD68, and SOTS test sets.

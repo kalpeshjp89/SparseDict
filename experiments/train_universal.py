@@ -114,12 +114,109 @@ def _metrics(prediction: torch.Tensor, target: torch.Tensor) -> dict[str, float]
 
 
 def _model_config(args: argparse.Namespace) -> dict[str, int | float]:
+    noise_std = (
+        args.logit_jitter
+        if args.phase == "warmup"
+        or (args.phase == "fine_tune" and args.fine_tune_jitter_steps > 0)
+        else 0.0
+    )
     return {
         "d": args.dim,
         "atoms_per_expert": args.atoms_per_expert,
         "top_k": args.top_k,
-        "noise_std": args.logit_jitter if args.phase == "warmup" else 0.0,
+        "noise_std": noise_std,
         "aux_weight": args.aux_weight,
+        "entropy_kappa": args.entropy_kappa,
+    }
+
+
+def _make_optimizer(
+    model: MasterMoETopKRestorer, args: argparse.Namespace
+) -> torch.optim.AdamW:
+    dictionary = model.dual_domain.dictionary
+    other_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter is not dictionary
+    ]
+    return torch.optim.AdamW(
+        [
+            {"params": other_parameters, "weight_decay": args.weight_decay},
+            {"params": [dictionary], "weight_decay": 0.0},
+        ],
+        lr=args.learning_rate,
+    )
+
+
+def _charbonnier_baselines(history: list[dict[str, Any]]) -> dict[str, float]:
+    if not history:
+        return {}
+    first_epoch = history[0].get("training_by_task", {})
+    return {
+        task: float(metrics["charbonnier"])
+        for task, metrics in first_epoch.items()
+        if float(metrics.get("charbonnier", 0.0)) > 0
+    }
+
+
+def _normalized_charbonnier(
+    loss: torch.Tensor,
+    task: str,
+    epoch: int,
+    baselines: dict[str, float],
+    enabled: bool,
+) -> torch.Tensor:
+    if not enabled or epoch == 0:
+        return loss
+    if task not in baselines:
+        raise ValueError(
+            f"task {task!r} has no initial-epoch Charbonnier baseline; "
+            "ensure every training task is represented in epoch 1"
+        )
+    return loss / max(baselines[task], 1e-8)
+
+
+def _effective_aux_weight(
+    expert_load: torch.Tensor,
+    base_weight: float,
+    collapsed_weight: float,
+    threshold: float,
+) -> float:
+    return (
+        collapsed_weight
+        if float(expert_load.max().item()) > threshold
+        else base_weight
+    )
+
+
+def _validation_acceptance(
+    history: list[dict[str, Any]], coherence_target: float
+) -> dict[str, Any]:
+    if not history:
+        raise ValueError("cannot evaluate acceptance without completed epochs")
+    curves: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for record in history:
+        for task, metrics in record["validation"]["tasks"].items():
+            curves[task].append((float(metrics["psnr"]), float(metrics["ssim"])))
+    monotonic_tasks = {
+        task: all(
+            current_psnr >= previous_psnr and current_ssim >= previous_ssim
+            for (previous_psnr, previous_ssim), (current_psnr, current_ssim) in zip(
+                values, values[1:]
+            )
+        )
+        for task, values in curves.items()
+    }
+    final_mu = float(history[-1]["validation"]["mutual_coherence_max"])
+    coherence_met = final_mu < coherence_target
+    validation_met = bool(monotonic_tasks) and all(monotonic_tasks.values())
+    return {
+        "passed": coherence_met and validation_met,
+        "coherence_target": coherence_target,
+        "final_mutual_coherence_max": final_mu,
+        "coherence_met": coherence_met,
+        "per_task_validation_monotonic": monotonic_tasks,
+        "validation_met": validation_met,
     }
 
 
@@ -149,6 +246,16 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
             if init_checkpoint is not None
             else None
         ),
+        "dictionary_checkpoint": (
+            str(args.dictionary_checkpoint.resolve())
+            if args.dictionary_checkpoint is not None
+            else None
+        ),
+        "dictionary_checkpoint_sha256": (
+            _file_sha256(args.dictionary_checkpoint)
+            if args.dictionary_checkpoint is not None
+            else None
+        ),
         "steps_per_epoch": args.steps_per_epoch,
         "patch_size": args.patch_size,
         "validation_samples_per_task": args.validation_samples_per_task,
@@ -156,6 +263,13 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
         "warmup_epochs": args.warmup_epochs,
         "gdl_weight": args.gdl_weight,
         "coherence_weight": args.coherence_weight,
+        "coherence_target": args.coherence_target,
+        "weight_decay": args.weight_decay,
+        "normalize_task_losses": args.normalize_task_losses,
+        "fine_tune_jitter_steps": args.fine_tune_jitter_steps,
+        "entropy_kappa": args.entropy_kappa,
+        "collapsed_aux_weight": args.collapsed_aux_weight,
+        "collapsed_expert_threshold": args.collapsed_expert_threshold,
         "checkpoint_every_steps": args.checkpoint_every_steps,
         "log_every_steps": args.log_every_steps,
         "seed": args.seed,
@@ -347,6 +461,7 @@ def _write_task_metrics(path: Path, records: list[dict[str, Any]]) -> None:
         "task",
         "train_loss",
         "train_charbonnier",
+        "train_normalized_charbonnier",
         "train_gradient_difference",
         "train_load_balance",
         "train_coherence",
@@ -361,6 +476,7 @@ def _write_task_metrics(path: Path, records: list[dict[str, Any]]) -> None:
         "train_expert_load_1",
         "train_expert_load_2",
         "train_expert_load_3",
+        "train_effective_aux_weight",
         "train_entropy_active_fraction",
         "train_entropy_mean",
         "train_entropy_threshold",
@@ -396,9 +512,11 @@ def _write_task_metrics(path: Path, records: list[dict[str, Any]]) -> None:
                 for name in (
                     "loss",
                     "charbonnier",
+                    "normalized_charbonnier",
                     "gradient_difference",
                     "load_balance",
                     "coherence",
+                    "effective_aux_weight",
                 ):
                     row[f"train_{name}"] = training.get(name, "")
                 for expert, value in enumerate(record["validation"]["expert_load"]):
@@ -459,6 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validation-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--dictionary-checkpoint", type=Path)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--warmup-epochs", type=int, default=50)
@@ -470,14 +589,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--logit-jitter", type=float, default=0.1)
+    parser.add_argument("--fine-tune-jitter-steps", type=int, default=500)
     parser.add_argument("--aux-weight", type=float, default=0.01)
+    parser.add_argument("--collapsed-aux-weight", type=float, default=0.05)
+    parser.add_argument("--collapsed-expert-threshold", type=float, default=0.45)
     parser.add_argument("--gdl-weight", type=float, default=0.1)
     parser.add_argument(
         "--coherence-weight",
         type=float,
-        default=1e-6,
+        default=1e-3,
         help="weight for the raw Task 6.1 Frame-Potential/Welch loss",
     )
+    parser.add_argument("--coherence-target", type=float, default=0.15)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument(
+        "--normalize-task-losses",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--entropy-kappa", type=float, default=0.1)
     parser.add_argument("--checkpoint-every-steps", type=int, default=100)
     parser.add_argument("--log-every-steps", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -497,8 +627,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--atoms-per-expert and --top-k are incompatible")
     if args.checkpoint_every_steps <= 0 or args.log_every_steps <= 0:
         parser.error("checkpoint and log intervals must be positive")
-    if args.learning_rate <= 0 or args.num_workers < 0:
-        parser.error("learning rate must be positive and num-workers non-negative")
+    if args.learning_rate <= 0 or args.num_workers < 0 or args.weight_decay < 0:
+        parser.error("learning rate must be positive; weight decay and workers non-negative")
+    if args.fine_tune_jitter_steps < 0 or args.aux_weight <= 0:
+        parser.error("fine-tune jitter steps must be non-negative and aux weight positive")
+    if args.collapsed_aux_weight < args.aux_weight:
+        parser.error("collapsed aux weight must be at least aux weight")
+    if not 0 < args.collapsed_expert_threshold <= 1:
+        parser.error("collapsed expert threshold must be in (0, 1]")
+    if not 0 < args.entropy_kappa:
+        parser.error("entropy kappa must be positive")
+    if not math.isfinite(args.coherence_target) or args.coherence_target <= 0:
+        parser.error("coherence target must be finite and positive")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA was requested but is unavailable")
@@ -522,8 +662,9 @@ def main(argv: list[str] | None = None) -> int:
         d=args.dim,
         atoms_per_expert=args.atoms_per_expert,
         top_k=args.top_k,
-        noise_std=args.logit_jitter if args.phase == "warmup" else 0.0,
+        noise_std=_model_config(args)["noise_std"],
         aux_weight=args.aux_weight,
+        entropy_kappa=args.entropy_kappa,
     ).to(device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = args.output_dir / "latest.pt"
@@ -533,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{latest_path} already exists; use --resume or choose a new output directory"
         )
     if args.resume and latest_path.is_file():
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        optimizer = _make_optimizer(model, args)
         (
             start_epoch,
             first_batch,
@@ -556,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     else:
+        if args.phase == "warmup" and args.init_checkpoint is None:
+            parser.error("warmup requires --init-checkpoint from Stage A dictionary seeding")
         if args.init_checkpoint is not None:
             if not args.init_checkpoint.is_file():
                 parser.error(f"initial checkpoint does not exist: {args.init_checkpoint}")
@@ -567,9 +710,13 @@ def main(argv: list[str] | None = None) -> int:
                 model.load_state_dict(model_state)
             else:
                 _load_dictionary(model, args.init_checkpoint, device)
-        elif args.phase == "warmup":
-            parser.error("warmup requires --init-checkpoint from Stage A dictionary seeding")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        if args.dictionary_checkpoint is not None:
+            if not args.dictionary_checkpoint.is_file():
+                parser.error(
+                    f"dictionary checkpoint does not exist: {args.dictionary_checkpoint}"
+                )
+            _load_dictionary(model, args.dictionary_checkpoint, device)
+        optimizer = _make_optimizer(model, args)
         start_epoch, first_batch, global_step, history, best_psnr = 0, 0, 0, [], -math.inf
         resumed_partial = {}
 
@@ -637,6 +784,15 @@ def main(argv: list[str] | None = None) -> int:
                     else 1
                 )
                 model.dual_domain.spatial_router.active_experts = active_experts
+                model.dual_domain.spatial_router.noise_std = (
+                    args.logit_jitter
+                    if args.phase == "warmup"
+                    or (
+                        args.phase == "fine_tune"
+                        and global_step < args.fine_tune_jitter_steps
+                    )
+                    else 0.0
+                )
                 model.train()
                 optimizer.zero_grad(set_to_none=True)
                 prediction, losses, details = model(
@@ -645,10 +801,27 @@ def main(argv: list[str] | None = None) -> int:
                     scale_factor=scale,
                     return_details=True,
                 )
+                loss_baselines = _charbonnier_baselines(history)
+                normalized_charbonnier = _normalized_charbonnier(
+                    losses["charbonnier"],
+                    task,
+                    epoch,
+                    loss_baselines,
+                    args.normalize_task_losses,
+                )
+                effective_aux_weight = _effective_aux_weight(
+                    details["expert_load"],
+                    args.aux_weight,
+                    args.collapsed_aux_weight,
+                    args.collapsed_expert_threshold,
+                )
+                weighted_load_balance = losses["load_balance"] * (
+                    effective_aux_weight / args.aux_weight
+                )
                 total_loss = (
-                    losses["charbonnier"]
+                    normalized_charbonnier
                     + args.gdl_weight * losses["gradient_difference"]
-                    + losses["load_balance"]
+                    + weighted_load_balance
                     + args.coherence_weight * losses["coherence"]
                 )
                 if not bool(torch.isfinite(total_loss)):
@@ -664,7 +837,13 @@ def main(argv: list[str] | None = None) -> int:
                 task_totals = totals[task]
                 task_totals["loss"] += float(total_loss.detach().item())
                 for name, value in losses.items():
+                    if name == "load_balance":
+                        value = weighted_load_balance
                     task_totals[name] += float(value.detach().item())
+                task_totals["normalized_charbonnier"] += float(
+                    normalized_charbonnier.detach().item()
+                )
+                task_totals["effective_aux_weight"] += effective_aux_weight
                 for expert, value in enumerate(details["expert_load"]):
                     task_totals[f"expert_load_{expert}"] += float(value.item())
                 task_totals["entropy_active_fraction"] += float(
@@ -690,6 +869,10 @@ def main(argv: list[str] | None = None) -> int:
                                 name: float(value.detach().item())
                                 for name, value in losses.items()
                             },
+                            "normalized_charbonnier": float(
+                                normalized_charbonnier.detach().item()
+                            ),
+                            "effective_aux_weight": effective_aux_weight,
                             "expert_load": details["expert_load"].tolist(),
                             "entropy_active_fraction": float(
                                 details["entropy_active_fraction"].item()
@@ -727,6 +910,30 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 for task, sums in totals.items()
             }
+            if args.normalize_task_losses and epoch == 0:
+                charbonnier_baselines = {
+                    task: values["charbonnier"]
+                    for task, values in train_summary.items()
+                    if values.get("charbonnier", 0.0) > 0
+                }
+                missing_tasks = sorted(
+                    {task for _, task, _ in train_dataset.rows}
+                    - charbonnier_baselines.keys()
+                )
+                if missing_tasks:
+                    raise ValueError(
+                        "initial epoch did not sample all training tasks; "
+                        f"missing baselines for {missing_tasks}. Increase "
+                        "--steps-per-epoch."
+                    )
+            else:
+                charbonnier_baselines = _charbonnier_baselines(history)
+            for task, values in train_summary.items():
+                values.setdefault(
+                    "normalized_charbonnier",
+                    values["charbonnier"]
+                    / max(charbonnier_baselines.get(task, values["charbonnier"]), 1e-8),
+                )
             validation = _validation(
                 model,
                 validation_dataset,
@@ -744,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
                     else 1
                 ),
                 "training_by_task": train_summary,
+                "charbonnier_baselines": charbonnier_baselines,
                 "validation": validation,
                 "elapsed_seconds": time.monotonic() - started,
                 "learning_rate": optimizer.param_groups[0]["lr"],
@@ -807,6 +1015,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
 
+    acceptance = (
+        _validation_acceptance(history, args.coherence_target)
+        if args.phase == "fine_tune"
+        else {"required": False}
+    )
     completed_status = {
         "status": "completed",
         "phase": args.phase,
@@ -814,16 +1027,24 @@ def main(argv: list[str] | None = None) -> int:
         "global_step": global_step,
         "best_validation_psnr": best_psnr,
         "checkpoint": str(latest_path),
+        "acceptance": acceptance,
         "updated_unix": time.time(),
     }
     latest_checkpoint = torch.load(latest_path, map_location="cpu", weights_only=False)
     latest_checkpoint["trainer_status"] = completed_status
     _atomic_checkpoint(latest_path, latest_checkpoint)
     _atomic_json(args.output_dir / "trainer_status.json", completed_status)
+    print(
+        "acceptance="
+        + json.dumps(completed_status["acceptance"], sort_keys=True),
+        flush=True,
+    )
     print(f"checkpoint={latest_path}")
     print(f"metrics={epoch_log}")
     print(f"status={args.output_dir / 'trainer_status.json'}")
-    return 0
+    if args.phase != "fine_tune":
+        return 0
+    return 0 if acceptance["passed"] else 2
 
 
 if __name__ == "__main__":

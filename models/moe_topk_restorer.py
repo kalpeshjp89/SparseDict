@@ -254,6 +254,7 @@ class MasterMoETopKRestorer(nn.Module):
         aux_weight: float = 0.01,
         coherence_lambda_fp: float = 1.0,
         coherence_lambda_hinge: float = 10.0,
+        entropy_kappa: float = 0.2,
         use_fused_kernel: bool = False,
     ) -> None:
         super().__init__()
@@ -276,7 +277,7 @@ class MasterMoETopKRestorer(nn.Module):
         self.entropy_gate = EntropyGate(
             channels=self.d,
             vocab_size=256,
-            kappa=0.2,
+            kappa=entropy_kappa,
             k_min=min(8, self.top_k),
             k_max=min(64, 2 * atoms_per_expert),
         )

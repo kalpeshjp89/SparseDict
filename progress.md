@@ -1018,12 +1018,9 @@ load-balance + Welch-hinged mutual coherence).
 ### Task 7.1
 
 - **Title:** K-Means++ Dictionary Seeding & Mutual Coherence Regularization
-- **Status:** Full-scale Stage A run completed by the user on Colab
-  (2026-11-02; artifacts archived from `stage_a-20261102T111810Z`).
-  Checkpoint shape acceptance met; coherence acceptance is explicitly
-  **not met at initialization** (mu = 0.99982 vs < 0.15) and, per the
-  adopted design, must be closed by Stage B/C coherence regularization —
-  pending trained-model verification.
+- **Status:** Stage A completed on Colab; full coherence acceptance remains
+  **not met** after Stage C (final `mu(D)=0.994454` vs `<0.15`). The Stage A
+  checkpoint's independent reload-and-norm assertion is still pending.
 - **Files:** `scripts/init_dictionaries.py`,
   `experiments/phase7_stage_a_colab.ipynb`,
   `tests/test_dictionary_init.py`.
@@ -1058,15 +1055,17 @@ load-balance + Welch-hinged mutual coherence).
     itself flags: coherence regularization (`MutualCoherenceLoss`,
     Task 6.1) during Stage B/C must drive the trained dictionary's
     coherence below 0.15 for full acceptance.
-- **What did not / blockers:** Trained-coherence acceptance remains open
-  (needs Stage B/C training logs recomputing `mu(D)`); an independent
-  second-path reload-and-assert of the Drive checkpoint (shape + coherence
-  recompute) has not been executed; the `.pth` lives only on the user's
-  Drive, not in the repo.
-- **Next:** Task 7.2b Stage B run with the seeded dictionary initialized
-  from the Drive checkpoint; recompute `max_{i != j} |G_ij|` on the
-  trained dictionary to close the < 0.15 acceptance.
-- **Last updated:** 2026-11-03
+- **Trained-coherence result (Stage C Colab, 2026-11-04):** Final checkpoint
+metrics report `mu(D)=0.9944539666` at epoch 20 (best/final observed
+`0.994454`), still far above `<0.15`. This closes the uncertainty about
+whether Stage C reached the coherence target: it did not.
+- **What did not / blockers:** The trained coherence gate is not met. An
+independent reload-and-norm assertion for the Stage A Drive checkpoint is
+also still pending; checkpoints remain on the user's Drive.
+- **Next:** Investigate the coherence loss/weight and dictionary parameter
+updates, then rerun the trained-coherence check. Keep this task open until
+the required criterion and independent checkpoint validation pass.
+- **Last updated:** 2026-11-04
 
 ### Task 7.2a
 
@@ -1088,7 +1087,7 @@ load-balance + Welch-hinged mutual coherence).
 ### Task 7.2b
 
 - **Title:** Universal Multi-Task Pre-Training
-- **Status:** Training workflow implemented; full Colab training pending.
+- **Status:** Previous Stage B/C runs completed but failed coherence and per-task trend gates. Rerun implementation is ready locally; it has not yet been synchronized to Colab or executed.
 - **Stage B warmup run (Colab T4, 2026-11-03):** completed 50/50 epochs /
   5,000 steps; val PSNR 24.21 -> 26.10 dB, SSIM 0.714 -> 0.793, decreasing task
   losses; Stage A checkpoint loaded clean;
@@ -1098,6 +1097,75 @@ load-balance + Welch-hinged mutual coherence).
   checkpoint interval 100 -> 25 for cheap session-chain resumes; this Colab
   runtime hides child-process stdout, so the notebook train cell captures child
   output and prints stderr tails (kept for future runs).
+- **Stage C Colab run and artifact inspection (2026-11-04):** Executed the
+  notebook's fine-tune cell and read the Drive status/metrics in the signed-in
+  Colab runtime. `returncode=0`; `trainer_status.json` says `completed`,
+  `epochs_completed=20`, `global_step=2000`, with best validation PSNR
+  `25.3926209753`; `latest.pt`, `metrics.jsonl` (20 epoch records), and
+  `metrics_by_task.csv` exist under `phase7/stage_c/`.
+- **Effective command/config:** `train_universal.py --phase fine_tune`
+  initialized from `phase7/stage_b/latest.pt`; `--epochs 20`,
+  `--warmup-epochs 0`, `--steps-per-epoch 100`, `--patch-size 144`,
+  `--validation-samples-per-task 8`, `--checkpoint-every-steps 25`,
+  `--device cuda`. Stage C has top-1 routing (`active_experts=1`) and no
+  jitter; the existing default coherence weight is `1e-6`. The executed
+  notebook code used patch size 144; the repository notebook was updated
+  from 128 to match.
+- **Actual Stage C data:** Training manifest used existing clean-image folders
+  for CBSD68 (`.../CBSD68/original`), SOTS (`.../SOTS/indoor/clear`),
+  Outdoor-Rain (`.../Outdoor-Rain/train/target`), and DIV2K
+  (`.../DIV2K_train_HR`). `DATASETS` was
+  `['cbsd68', 'sots', 'outdoor-rain', 'div2k']`; Flickr2K was not included.
+  Urban100 was prepared for the optional benchmark, not included in this
+  training manifest. The loader synthesized SRx2/x3/x4, denoise15/25/50,
+  derain, desnow, dehaze, lowlight, and JPEG tasks. Validation used 8 samples
+  per task per epoch, so interpret small per-task changes cautiously.
+- **Stage C aggregate validation:** Mean PSNR/SSIM was `24.9832/0.7807` at
+  epoch 1, peaked at `25.3926/0.7968` at epoch 7, and ended at
+  `25.0479/0.7864` at epoch 20. Final `mu(D)=0.994454` (epoch 1:
+  `0.995387`), failing the required `<0.15` criterion by a wide margin.
+  Final aggregate validation expert loads were
+  `[0.2538, 0.1241, 0.5172, 0.1050]`: all four experts were used, though
+  utilization was substantially imbalanced.
+- **Per-task trend (epoch 1 -> 20):** Logged task training losses decreased
+  for 8/11 tasks but increased for denoise25 (`0.3212 -> 0.3230`), lowlight
+  (`0.4368 -> 0.4454`), and SRx4 (`0.3210 -> 0.3343`). Validation was also
+  mixed: mean PSNR improved only slightly overall (`24.9832 -> 25.0479`),
+  while dehaze and denoise50 regressed (`19.991 -> 19.213` and
+  `22.856 -> 22.707`). These curves do not support claiming uniformly
+  decreasing task losses or consistent per-task improvement.
+- **Coherence-retrain implementation (2026-11-04):** Added
+  `scripts/warmup_coherence.py` to optimize only the four expert banks as one
+  global dictionary with the existing `MutualCoherenceLoss`, Adam and
+  `weight_decay=0`. Defaults: up to 1,000 steps, checking every 10, and strict
+  stop gate `mu(D)<0.20`; it atomically saves the new
+  `pretrained_dictionaries_incoherent.pth` plus status/trajectory metadata and
+  exits nonzero if the gate is missed. Stage C can now load the Stage B model
+  while overriding just its dictionary via `--dictionary-checkpoint`.
+- **Trainer controls implemented:** AdamW now places the dictionary in its own
+  zero-weight-decay parameter group. The coherence coefficient default is
+  `1e-3` (up from `1e-6`); task Charbonnier losses are normalized by the
+  per-task epoch-1 mean, with missing baselines rejected. Fine-tune routing
+  uses `0.1` Gaussian logit jitter for the first 500 steps, then turns it off;
+  batch-level max expert load above `0.45` raises auxiliary weight from `0.01`
+  to `0.05`; entropy threshold kappa is configurable and defaults to `0.1`.
+  The Stage C Colab notebook now keeps the old run intact, adds the coherence
+  warmup gate, and launches the 20-epoch retrain in a separate
+  `stage_c_coherence_retrain` directory from the Stage B model plus warmed
+  dictionary.
+- **Acceptance gate:** Fine-tune checkpoints now record whether final
+  `mu(D)<0.15` and whether every task's PSNR and SSIM were non-decreasing
+  across all validation epochs. The trainer returns nonzero if either gate
+  fails. Stage B warmup is not subject to this final fine-tune gate.
+- **Local verification:** Focused pytest set passed (32 tests); the full suite
+  passed **181 tests, 36 skipped**. A tiny two-epoch CPU training smoke test
+  verified per-task baselines, checkpoint resume format, and zero dictionary
+  weight decay. A second smoke test confirmed a failed coherence threshold
+  is written in `trainer_status.json` and returns code 2. Synthetic CPU
+  warmup smoke check reduced max coherence only `0.99838 -> 0.99719` in 30
+  steps and did not meet `<0.20`; this confirms the target is not guaranteed
+  by the optimizer and must be treated as a hard gate, not a success-shaped
+  fallback. The full seeded-dictionary warmup and Stage C retrain have not run.
 - **Files:** `experiments/train_universal.py`,
   `data/universal_loader.py`, `scripts/make_universal_manifest.py`,
   `experiments/phase7_stage_b_colab.ipynb`,
@@ -1105,10 +1173,9 @@ load-balance + Welch-hinged mutual coherence).
 - **Acceptance:** Stage B combined-training warmup (DIV2K, Flickr2K,
   CBSD68, SOTS, Outdoor-Rain) with `E_act = 2` for the first 50 epochs and
   logit jitter `N(0, 0.1^2)`; Stage C hard top-1 fine-tuning with the
-  adaptive entropy gate `tau_H = mu_H + 0.2 * sigma_H` under the unified
-  multi-task loss. Verification: monotone training-loss decrease across
-  tasks, logged PSNR/SSIM validation curves, and no collapsed expert in
-  the load distribution.
+  adaptive entropy gate `tau_H = mu_H + 0.1 * sigma_H` under the unified
+  multi-task loss. Final gates: `mu(D)<0.15` and non-decreasing validation
+  PSNR and SSIM per task across epochs.
 - **What works / evidence:** Added deterministic task manifests and paired
   synthetic degradation patches (SR x2/x3/x4, denoising, rain, snow, haze,
   low-light, JPEG), Stage B two-expert/jitter warmup, Stage C strict top-1
@@ -1146,14 +1213,13 @@ load-balance + Welch-hinged mutual coherence).
   A CPU end-to-end smoke run completed Stage A, interrupted Stage B after
   step 1 and resumed it at step 1 to complete step 2, then completed Stage C.
   Checkpoint, status, step, epoch, and per-task log files were verified.
-- **What did not / blockers:** Full Colab training and convergence,
-  no-collapsed-expert, and `mu<0.15` acceptance PARTIALLY VERIFIED (2026-11-03): training ran and converged on the
-    compiled metric set, but the coherence gate is OPEN - logged mu(D) moved
-    only 0.9998 -> 0.9959 across 5,000 warmup steps, far above the mu<0.15
-    target (Welch floor for a 4096x64 frame ~0.124), so closing the gate needs
-    an explicit Stage C decision (stronger coherence pressure or a revised
-    gate), not more warmup steps. Expert-load distribution reads fine in
-    metrics_by_task.csv. DIV2K
+- **What did not / blockers:** Previous Stage C completed, but the strict coherence
+  threshold failed (`0.994454` vs `<0.15`), and per-task loss/validation trends
+  are mixed as detailed above. Stage B previously logged `mu(D)=0.9959`
+  after 5,000 warmup steps; Stage C only reduced it to `0.994454`. The Stage C
+  final checkpoint has not been independently reloaded to recompute coherence.
+  Flickr2K was not used in Stage C despite being listed in the broader
+  combined-corpus todo; Urban100 was only acquired for benchmarking. DIV2K
   download is wired to the existing licensed downloader; Flickr2K, CBSD68,
   SOTS and Outdoor-Rain directories remain optional mounted inputs. The
   default workflow synthesizes degradations from clean images; real paired
@@ -1194,16 +1260,19 @@ load-balance + Welch-hinged mutual coherence).
   `kaggle.json` on Colab for the SOTS path; for Rain13K, real pairs come
   from its input/target layout via the existing CSV manifest support
   (clean-side training via the `target` dir resolution also works).
-- **Next:** Commit + push, then on Colab (a) pull, (b) run the one-corpus-
-  at-a-time shard/prepare flow (CBSD68 -> SOTS -> Outdoor-Rain -> DIV2K,
-  skip Flickr2K until storage allows), (c) run Stage B with Drive-mounted
-  shards, and inspect per-task curves and coherence.
-- **Last updated:** 2026-11-02
+- **Next:** Synchronize these local changes to the Colab clone (the notebook
+  pulls `master`; the local implementation is not present there yet). Run the
+  1,000-step coherence warmup and proceed only if `mu(D)<0.20`; then run the
+  20-epoch Stage C pass in its new output directory. Independently reload the
+  final checkpoint and require `mu(D)<0.15`; inspect every task's PSNR/SSIM
+  for late-stage drift. Do not start benchmarking from the previous
+  high-coherence checkpoint.
+- **Last updated:** 2026-11-04
 
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
-- **Status:** Not started.
+- **Status:** Blocked; not implemented or run.
 - **Files:** `experiments/eval_benchmarks.py`, `results/benchmark_summary.json`.
 - **Acceptance:** Evaluate SR x2/x3/x4, denoising sigma=15/25/50,
   deraining, dehazing, and JPEG cleanup; compare against SwinIR, Restormer,
@@ -1212,7 +1281,12 @@ load-balance + Welch-hinged mutual coherence).
   comparisons to `results/benchmark_summary.json` executed automatically
   by the test suite.
 - **What works / evidence:** Not implemented.
-- **What did not / blockers:** Depends on Task 7.2b trained checkpoints
-  and target-GPU access.
-- **Next:** After Task 7.2b, write the evaluation harness.
-- **Last updated:** 2026-11-02
+- **What did not / blockers:** Task 7.2b has not produced an accepted
+  low-coherence checkpoint. `experiments/eval_benchmarks.py` is absent, and
+  SwinIR/Restormer/HAT-L implementations plus compatible pretrained weights
+  are not present in the repository. No baseline inference, PSNR/SSIM,
+  FLOP, or 100-iteration CUDA-event comparison has been executed.
+- **Next:** After Task 7.2b acceptance, identify/provide the baseline
+  implementations and checkpoints, implement the evaluator, and run it on
+  Urban100/CBSD68/SOTS on the target GPU before marking complete.
+- **Last updated:** 2026-11-04
