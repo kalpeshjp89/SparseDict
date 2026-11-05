@@ -120,10 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--coherence-max-weight",
         type=float,
-        default=16.0,
+        default=64.0,
         help="weight of the smooth-max limb; 0 reproduces the legacy loss",
     )
-    parser.add_argument("--max-temperature", type=float, default=0.05)
+    parser.add_argument("--max-temperature", type=float, default=0.02)
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
