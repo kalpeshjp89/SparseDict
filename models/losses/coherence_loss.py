@@ -19,15 +19,43 @@ class MutualCoherenceLoss(nn.Module):
     orthogonality and, via a hinge, any pairwise absolute cosine exceeding
     the Welch bound
     ``mu_WB = sqrt((M - d) / (d * (M - 1)))``.
+
+    The hinge's ``1 / (M * (M - 1))`` normalization makes per-pair gradients
+    negligible when only a few atom pairs are collinear, and the frame
+    potential has an interior minimum that does not bound the max off-diagonal
+    (mutual coherence). ``lambda_max`` adds a differentiable smooth-max limb
+
+    ``L_max = lambda_max * tau * logsumexp(off_diagonal / tau)``
+
+    whose gradient concentrates on the most collinear pairs via a softmax
+    (temperature ``tau``; smaller tau sharpens toward the true max while
+    spreading gradient over the near-max set). Default weight 0 keeps the
+    historical behavior.
     """
 
-    def __init__(self, lambda_fp: float = 1.0, lambda_hinge: float = 10.0) -> None:
+    def __init__(
+        self,
+        lambda_fp: float = 1.0,
+        lambda_hinge: float = 10.0,
+        lambda_max: float = 0.0,
+        max_temperature: float = 0.05,
+    ) -> None:
         super().__init__()
-        for name, value in (("lambda_fp", lambda_fp), ("lambda_hinge", lambda_hinge)):
+        for name, value in (
+            ("lambda_fp", lambda_fp),
+            ("lambda_hinge", lambda_hinge),
+            ("lambda_max", lambda_max),
+        ):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative; got {value}")
+        if not math.isfinite(max_temperature) or max_temperature <= 0:
+            raise ValueError(
+                f"max_temperature must be finite and positive; got {max_temperature}"
+            )
         self.lambda_fp = float(lambda_fp)
         self.lambda_hinge = float(lambda_hinge)
+        self.lambda_max = float(lambda_max)
+        self.max_temperature = float(max_temperature)
 
     def welch_bound(self, atom_count: int, atom_dim: int) -> float:
         """Return the Welch bound for ``atom_count`` atoms of dimension ``atom_dim``."""
@@ -63,4 +91,10 @@ class MutualCoherenceLoss(nn.Module):
         excess = torch.clamp(off_diagonal - welch, min=0.0)
         hinge = excess.pow(2).sum(dim=(-2, -1)) / (atom_count * (atom_count - 1))
 
-        return self.lambda_fp * frame_potential + self.lambda_hinge * hinge
+        loss = self.lambda_fp * frame_potential + self.lambda_hinge * hinge
+        if self.lambda_max:
+            smooth_max = self.max_temperature * torch.logsumexp(
+                off_diagonal / self.max_temperature, dim=(-2, -1)
+            )
+            loss = loss + self.lambda_max * smooth_max
+        return loss

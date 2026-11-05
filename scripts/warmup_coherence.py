@@ -68,10 +68,14 @@ def optimize_dictionary(
     max_steps: int,
     target: float,
     check_every: int,
+    max_weight: float = 0.0,
+    max_temperature: float = 0.05,
 ) -> tuple[torch.Tensor, list[dict[str, float | int]], bool]:
     dictionary = torch.nn.Parameter(initial_dictionary.detach().clone())
     optimizer = torch.optim.Adam([dictionary], lr=learning_rate, weight_decay=0.0)
-    coherence_loss = MutualCoherenceLoss()
+    coherence_loss = MutualCoherenceLoss(
+        lambda_max=max_weight, max_temperature=max_temperature
+    )
     history: list[dict[str, float | int]] = []
     current_coherence = float(mutual_coherence_of(dictionary.detach()).item())
     if current_coherence < target:
@@ -114,6 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", type=float, default=0.20)
     parser.add_argument("--check-every", type=int, default=10)
     parser.add_argument(
+        "--coherence-max-weight",
+        type=float,
+        default=16.0,
+        help="weight of the smooth-max limb; 0 reproduces the legacy loss",
+    )
+    parser.add_argument("--max-temperature", type=float, default=0.05)
+    parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     args = parser.parse_args(argv)
@@ -145,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.steps,
         target=args.target,
         check_every=args.check_every,
+        max_weight=args.coherence_max_weight,
+        max_temperature=args.max_temperature,
     )
     flat = optimized.flatten(end_dim=-2)
     final_mu = float(mutual_coherence_of(optimized).item())
@@ -168,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
                 "steps": history[-1]["step"] if history else 0,
                 "learning_rate": args.learning_rate,
                 "weight_decay": 0.0,
+                "max_weight": args.coherence_max_weight,
+                "max_temperature": args.max_temperature,
                 "history": history,
                 "elapsed_seconds": time.monotonic() - started,
                 "updated_unix": time.time(),
