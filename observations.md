@@ -235,3 +235,26 @@ Keep this file updated as new observations arise.
     fused kernels are excluded by design. Op mix: mm/conv2d/bmm dominate.
 
 38. (Drive web-UI empty-folder illusion, 2026-11-03.) After an interrupted drive.flush_and_unmount(), the Drive web UI showed phase7/stage_b empty across repeated hard reloads and title searches while the files existed server-side; a fresh drive.mount('/content/drive', force_remount=True) in the same session listed them immediately (best.pt 5.38 MB, latest.pt 5.39, metrics.jsonl 0.34, metrics_by_task.csv 0.26, steps.jsonl 0.28, train.csv 13.78, validation.csv 1.53, trainer_status.json ~0). Lessons: (a) trust kernel-side os.listdir over the Drive web UI when judging persistence; (b) an interrupted flush_and_unmount leaves the mount torn down (MyDrive path ENOENT) but deletes nothing on the server; (c) force_remount=True restores access in-session without data loss.
+
+39. (Coherence gate recalibrated to per-bank, 2026-11-06.) The Stage C
+    global mu<0.20 warmup gate failed twice on the real Stage A dictionary
+    (mu 0.9978 -> 0.9714 over 2000 steps, T4; earlier legacy attempt flat
+    at the loss floor with near-zero gradients). Root cause analysis: with
+    M=4096 atoms in d=64 (M > d(d+1)/2 = 2080) no real equiangular tight
+    frame exists and the practically attainable global coherence is
+    ~0.35-0.5 (random dicts measure ~0.59); the 0.124 Welch bound quoted
+    earlier is unattainable at this size, so the gate measured a structure
+    that cannot exist. User decision: measure coherence PER BANK (4 x
+    1024x64, one bank per MoE expert; per-bank ETFs are feasible, per-bank
+    Welch bound ~0.121; cross-bank collinearity never affects
+    reconstruction). Implementation (tests 181 passed):
+    mutual_coherence_of() now evaluates each leading-dim bank separately
+    (2-D input = single bank); the model coherence aux limb passes the
+    banked dictionary and sums; warmup_coherence.optimize_dictionary
+    optimizes the banked (4,1024,64) dictionary directly; Welch bound
+    clamps to 0 for under-complete banks (M<=d); warmup defaults lambda=
+    64/tau=0.02 (log-sum-exp smooth-max limb, targets the near-max pair
+    set) with --steps 2000 in the notebook cell. Local synthetic sweep on
+    a Stage-A-like mimic (mu 0.984): the limb drives mu to 0.35-0.42 by
+    step 600 at lr 0.01 AND 0.03 - same floor as the global problem; per
+    -bank geometry is what makes the 0.20 target plausible, not the limb.

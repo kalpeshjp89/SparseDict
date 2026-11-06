@@ -218,16 +218,20 @@ def gradient_difference_loss(prediction, target, eps=1e-6):
 
 
 def mutual_coherence_of(atoms: torch.Tensor) -> torch.Tensor:
-    """Maximum off-diagonal pairwise cosine among atom rows of ``(..., M, d)``."""
+    """Maximum off-diagonal pairwise cosine within each ``(M, d)`` atom bank.
+
+    Leading dims are treated as independent banks (one per MoE expert); each
+    bank's Gram matrix is evaluated separately and the returned scalar is the
+    worst bank's coherence. A 2-D ``(M, d)`` input counts as a single bank.
+    """
     if atoms.ndim < 2:
         raise ValueError(f"expected atom rows (..., M, d); got {tuple(atoms.shape)}")
-    flat = atoms.flatten(end_dim=-2)
-    if flat.size(0) < 2:
+    if atoms.size(-2) < 2:
         raise ValueError("at least two atoms are required")
-    normalized = flat / (flat.norm(dim=-1, keepdim=True) + 1e-12)
+    normalized = atoms / (atoms.norm(dim=-1, keepdim=True) + 1e-12)
     gram = normalized @ normalized.transpose(-1, -2)
-    mask = 1.0 - torch.eye(flat.size(0), device=flat.device, dtype=gram.dtype)
-    return (gram * mask).abs().max()
+    mask = 1.0 - torch.eye(atoms.size(-2), device=atoms.device, dtype=gram.dtype)
+    return (gram * mask).abs().amax()
 
 
 class MasterMoETopKRestorer(nn.Module):
@@ -410,8 +414,8 @@ class MasterMoETopKRestorer(nn.Module):
             "gradient_difference": gradient_difference_loss(prediction, target),
             "load_balance": self.balance_loss(gates),
             "coherence": self.coherence_loss(
-                self.dual_domain.dictionary.flatten(end_dim=-2)
-            ),
+                self.dual_domain.dictionary
+            ).sum(),
         }
         if return_details:
             routing_load = gates.detach().mean(dim=(0, 1))

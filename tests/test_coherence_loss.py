@@ -52,12 +52,13 @@ def test_non_finite_lambdas_are_rejected() -> None:
 
 
 def test_invalid_dictionary_shapes_are_rejected() -> None:
+    # under-complete banks are allowed now: M <= d maps the Welch bound to 0
+    # (an orthogonal frame exists), but the loss must stay finite and >= 0.
+    for shape in ((8, 16), (4, 16)):
+        loss = MutualCoherenceLoss()(torch.ones(*shape, dtype=torch.float64))
+        assert loss.item() >= 0.0
     with pytest.raises(ValueError):
-        MutualCoherenceLoss()(torch.ones(8, 16, dtype=torch.float64))
-    with pytest.raises(ValueError):
-        MutualCoherenceLoss()(torch.ones(4, 16, dtype=torch.float64))
-    with pytest.raises(ValueError):
-        MutualCoherenceLoss()(torch.ones(8, 16, dtype=torch.int64).float())
+        MutualCoherenceLoss()(torch.ones(8, 16, dtype=torch.int64))
 
 
 def test_welch_bound_value() -> None:

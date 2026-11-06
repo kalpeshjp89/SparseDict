@@ -83,7 +83,7 @@ def optimize_dictionary(
 
     for step in range(1, max_steps + 1):
         optimizer.zero_grad(set_to_none=True)
-        loss = coherence_loss(dictionary.flatten(end_dim=-2)).sum()
+        loss = coherence_loss(dictionary).sum()
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError(f"non-finite coherence loss at step {step}")
         loss.backward()
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         **payload["coherence_warmup"],
         "dictionary_shape": list(optimized.shape),
         "welch_bound": MutualCoherenceLoss().welch_bound(
-            flat.size(0), flat.size(1)
+            optimized.size(-2), optimized.size(-1)
         ),
     }
     print(json.dumps(report, indent=2), flush=True)

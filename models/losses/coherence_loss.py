@@ -58,7 +58,13 @@ class MutualCoherenceLoss(nn.Module):
         self.max_temperature = float(max_temperature)
 
     def welch_bound(self, atom_count: int, atom_dim: int) -> float:
-        """Return the Welch bound for ``atom_count`` atoms of dimension ``atom_dim``."""
+        """Return the Welch bound for ``atom_count`` atoms of dimension ``atom_dim``.
+
+        For under-complete banks (``atom_count <= atom_dim``) an orthogonal
+        frame exists, so the lower bound on the mutual coherence is 0.
+        """
+        if atom_count <= atom_dim:
+            return 0.0
         return math.sqrt((atom_count - atom_dim) / (atom_dim * (atom_count - 1)))
 
     def forward(self, dictionary: torch.Tensor) -> torch.Tensor:
@@ -69,11 +75,6 @@ class MutualCoherenceLoss(nn.Module):
         if atom_count < 2:
             raise ValueError(
                 f"the Welch bound requires at least two atoms; got {atom_count}"
-            )
-        if atom_count < atom_dim:
-            raise ValueError(
-                "the Welch bound requires atom_count >= atom_dim; got "
-                f"M={atom_count}, d={atom_dim}"
             )
         if bool(torch.isinf(dictionary).any()) or bool(torch.isnan(dictionary).any()):
             raise ValueError("dictionary must contain only finite values")
