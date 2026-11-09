@@ -1353,8 +1353,28 @@ the required criterion and independent checkpoint validation pass.
   auto-skip only when `coherence_warmup.status == target_met`; then Stage
   C fine-tune with `--steps-per-epoch 50` (batch stays 1; budget halved
   after the Kaggle session kill) and `--coherence-target 0.20` per-bank
-  gate (obs #39; stale 0.15 removed from this cell). Repo notebook sync
-  pending until run completes.
+  gate (obs #39; stale 0.15 removed from this cell).
+- **2026-11-09 Stage C run result (Colab T4):** (a) 30k warmup resume
+  @lr 0.03/tau 0.02 -> mu 0.21262 `target_not_met` (rc 2; plateau
+  0.211-0.213, matches the Kaggle 0.211872 record). (b) Decay pass
+  @lr 0.005/tau 0.005 (the todo.md 7.1 recipe) reached target in 30
+  steps: **mu 0.19884 `target_met`** (2.0 s). The mu<0.20 checkpoint is
+  now persisted on Drive at
+  `phase7/stage_c_coherence_retrain/pretrained_dictionaries_incoherent.pth`
+  (no longer ephemeral like the lost Kaggle artifact). (c) Stage C
+  fine-tune: **20/20 epochs completed, no crashes/OOM**; validation
+  PSNR 25.297 -> 25.585 and SSIM 0.7893 -> 0.7966 (both improved), BUT
+  per-bank mu crept back up 0.2015 -> 0.2908 (+~0.005/epoch) and the
+  acceptance gate **correctly FAILED (rc 2)**. Artifacts preserved at
+  `phase7/stage_c_coherence_retrain/`: `stage_c_failure.log` (full
+  stream of both stages), metrics.jsonl, trainer_status.json, and the
+  Stage C checkpoint. Blocker: coherence_weight 1e-3 is too weak to hold
+  the banked mu gate during top-1 fine-tuning; the regularizer loses to
+  the task loss. Next: rerun fine-tune from the same Stage B init with
+  stronger coherence regularization (e.g. `--coherence-weight` 0.01+)
+  and/or a decaying dictionary-LR schedule, or apply a post-fine-tune
+  decay pass followed by a short re-adaptation. PSNR/SSIM gains show the
+  run was healthy apart from coherence drift.
 
 ### Task 7.2c
 

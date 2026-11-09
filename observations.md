@@ -273,3 +273,16 @@ Keep this file updated as new observations arise.
     (`--steps-per-epoch 50`) per user instruction after the Kaggle
     failures; all child output streams to Drive `stage_c_failure.log`
     because a dead runtime cannot write its own post-mortem.
+
+41. **Warmup gate passes but Stage C drifts back (2026-11-09).** Full
+    Colab chain on T4: 30k resume @lr 0.03/tau 0.02 -> mu 0.2126
+    (plateau, rc 2); decay pass @lr 0.005/tau 0.005 -> mu 0.19884
+    target_met in 30 steps (matches the lost Kaggle artifact recipe,
+    todo.md 7.1); Stage C fine-tune 20/20 epochs, PSNR 25.297 -> 25.585,
+    SSIM 0.7893 -> 0.7966, but mu rose monotonically-ish 0.2015 -> 0.2908
+    (~+0.005/epoch) and the acceptance gate failed rc 2 as designed.
+    Lesson: the dictionary-only warmup gate is NOT preserved by
+    fine-tuning at coherence-weight 1e-3; the task loss dominates. The
+    mu<0.20 warmup checkpoint IS now persistent on Drive
+    (phase7/stage_c_coherence_retrain/). No GPU crash or OOM occurred
+    with batch 1 / steps-per-epoch 50 / expandable_segments.
