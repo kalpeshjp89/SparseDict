@@ -371,3 +371,42 @@ Keep this file updated as new observations arise.
     (~15-17 dB) — synthetic haze may not match SOTS protocol. Baselines
     (SwinIR/Restormer/HAT-L) not yet evaluated. SSIM from simplified
     window-based metric; standard SSIM verification pending.
+
+48. **Research analysis: dehazing/low-light failure root cause + training
+    scale (2026-11-09).**
+    Root cause: Dehazing and low-light are non-local spatial phenomena.
+    A 64x64 patch of pure sky/haze is indistinguishable from a uniform
+    white box. Without global min/max illumination, the model cannot
+    estimate transmission map or atmospheric light. Patch-based training
+    fundamentally limits these tasks.
+    Training is insufficient: 50 steps/epoch x 20 epochs = 1000 gradient
+    steps total, ~90 per task. Standard protocols use 500K iterations
+    (12-24 hours). The network has barely begun to optimize.
+    Solutions:
+    (1) Global context injection: downsample full image to 64x64 thumbnail,
+    pass through 3-layer ConvNet -> v_global in R^d. Concatenate to router
+    input (Pool(X_local) + e_scale(s) + v_global). Use v_global for FiLM
+    modulation (gamma*X + beta) on local patch features.
+    (2) Scale up training: 500 steps/epoch, 50-100 epochs, 96x96 or
+    128x128 patch fine-tuning pass.
+    (3) Diagnostic checks: entropy gate active ratio (target >40%),
+    expert load distribution (no bank >60%), cross-attention weight/norm
+    audit (avoid uniform softmax), spatial-frequency residual energy.
+    (4) Create scripts/debug_diagnostics.py for pre-debugging verification.
+    Next: implement global context injection + diagnostic script + scale
+    up training config.
+
+49. **Global context injection implemented (2026-11-09).** Added
+    `models/modules/global_context.py` with `GlobalContextStem` (3-layer
+    ConvNet, 64x64 thumbnail -> R^d) and `FiLMLayer` (gamma*X + beta).
+    `MasterMoETopKRestorer` now accepts `global_context_dim` (default 0 =
+    disabled for backward compat). When enabled: computes v_global, applies
+    FiLM modulation on local features, passes v_global to the spatial router
+    for improved routing on non-local degradations. `DualDomainMoEDictionary`
+    and `DegradationAwareRouter` updated to accept and propagate
+    global_context. `train_universal.py` gains `--global-context-dim` flag.
+    `eval_benchmarks.py` gains `--global-context-dim` flag. Checkpoint
+    loading uses strict=False for backward compat with old checkpoints.
+    `scripts/debug_diagnostics.py` created for pre-debugging verification.
+    Tests: 183 passed. Next: retrain with --global-context-dim 64 and
+    --steps-per-epoch 500 for 50-100 epochs to address dehazing/low-light.
