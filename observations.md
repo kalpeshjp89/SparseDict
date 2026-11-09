@@ -258,3 +258,18 @@ Keep this file updated as new observations arise.
     a Stage-A-like mimic (mu 0.984): the limb drives mu to 0.35-0.42 by
     step 600 at lr 0.01 AND 0.03 - same floor as the global problem; per
     -bank geometry is what makes the 0.20 target plausible, not the limb.
+
+40. **Warmup checkpoint provenance resolved (2026-11-09).** Kaggle history
+    probe: `stage-c-warmup-resume`, `notebook7bfae8e657`,
+    `notebookb17661fbf3` all redirect to /edit = zero saved versions (no
+    outputs, no logs); `notebook50056a76c6` is the failed Stage C attempt
+    (Internet OFF -> git clone could not resolve github.com; input not
+    attached). Conclusion: the user-reported "mu<0.20 achieved" is not
+    backed by any saved artifact; the only valid warmed checkpoint is
+    mu=0.2553 `target_not_met` from `stage-c-warmup-gpu` v2. Decision:
+    do not skip warmup on the 0.2553 checkpoint; Colab cell 5 now resumes
+    warmup on GPU (30k steps, lr 0.03, target 0.20) and hard-fails Stage C
+    if `coherence_warmup.status != target_met`. Budget halved
+    (`--steps-per-epoch 50`) per user instruction after the Kaggle
+    failures; all child output streams to Drive `stage_c_failure.log`
+    because a dead runtime cannot write its own post-mortem.

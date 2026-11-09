@@ -1087,7 +1087,7 @@ the required criterion and independent checkpoint validation pass.
 ### Task 7.2b
 
 - **Title:** Universal Multi-Task Pre-Training
-- **Status:** Previous Stage B/C runs completed but failed coherence and per-task trend gates. Rerun implementation is ready locally; it has not yet been synchronized to Colab or executed.
+- **Status (2026-11-06):** Prior Stage C failed the coherence and per-task trend gates. Kaggle T4 coherence warmup now reached $\mu(D)=0.198977$, but the final fine-tune has not started: the mounted Stage B manifests reference Colab Drive image paths, and no Kaggle-native image manifests are ready.
 - **Stage B warmup run (Colab T4, 2026-11-03):** completed 50/50 epochs /
   5,000 steps; val PSNR 24.21 -> 26.10 dB, SSIM 0.714 -> 0.793, decreasing task
   losses; Stage A checkpoint loaded clean;
@@ -1260,14 +1260,101 @@ the required criterion and independent checkpoint validation pass.
   `kaggle.json` on Colab for the SOTS path; for Rain13K, real pairs come
   from its input/target layout via the existing CSV manifest support
   (clean-side training via the `target` dir resolution also works).
-- **Next:** Synchronize these local changes to the Colab clone (the notebook
-  pulls `master`; the local implementation is not present there yet). Run the
-  1,000-step coherence warmup and proceed only if `mu(D)<0.20`; then run the
-  20-epoch Stage C pass in its new output directory. Independently reload the
-  final checkpoint and require `mu(D)<0.15`; inspect every task's PSNR/SSIM
-  for late-stage drift. Do not start benchmarking from the previous
-  high-coherence checkpoint.
-- **Last updated:** 2026-11-04
+- **Kaggle coherence warmup (2026-11-06):** The user-run initial 6,000-step
+  T4x2 warmup plateaued at `mu=0.2553`. Resumed the checkpoint in Kaggle
+  notebook `stage-c-warmup-resume` at `/kaggle/input/notebooks/kalpeshjp89/stage-c-warmup-gpu/pretrained_dictionaries_incoherent.pth`,
+  with 30,000 steps, LR `0.03`, target `0.20`, max weight `64`, and
+  temperature `0.02`. It completed 30,000 steps but returned `target_not_met`,
+  ending at `mu=0.211872` from `0.255291`.
+- **Kaggle decay pass (2026-11-06):** Continued from the 30,000-step output
+  on a Tesla T4 with LR `0.005` and temperature `0.005`, retaining the
+  coherence max weight and target. The warmup script stopped as soon as the
+  target was crossed (30 steps, not the full 5,000-step budget), reporting
+  `target_met`, `mu=0.198977`, down from `0.211872`. The checkpoint exists at
+  `/kaggle/working/pretrained_dictionaries_incoherent_decay_5000.pth`
+  (3,097,459 bytes) but remains ephemeral until saved/exported.
+- **Kaggle input/data audit:** `Downloads/stage_a-20261102T111810Z-1-001.zip`
+  contains Stage A checkpoints and metrics. `Downloads/stage_b_rescue.zip`
+  contains a completed Stage B rescue (`latest.pt`, 50 epochs / 5,000 steps),
+  plus train/validation manifests and logs. Kaggle's mounted warmup notebook
+  input also contains Stage A/B checkpoints and those manifests. However, the
+  manifest image paths are `/content/drive/MyDrive/SparseDict/datasets/...`
+  and do not resolve in Kaggle; the only locally mounted paths at inspection
+  were the warmup notebook outputs and its `sd-input` checkpoint/manifests.
+- **Kaggle dataset catalog check:** Public Kaggle search returned candidate
+  sources for DIV2K (`DIV2K Dataset`, Joe Ho, 8 GB; also a 4 GB HR copy),
+  Flickr2K (Daeho Yang, 12 GB), CBSD68 (`CBSD68`, Tarek Mebrouk, 21 MB),
+  and SOTS (`Synthetic Objective Testing Set (SOTS) [RESIDE]`, Balraj
+  Ashwath, 435 MB). Rain13K searches returned public Rain13k dataset copies;
+  the user's HF-derived Rain input was not found in the mounted Stage B data
+  or by searching `Your Work` for `Rain13K`. Urban100 also appears in the
+  existing workflow as optional benchmark data. Catalog discovery alone does
+  not verify archive contents, folder layout, licensing, or exact Kaggle input
+  paths; attach/inspect each candidate and locate the user's Rain dataset
+  before generating Kaggle-native manifests.
+- **Kaggle license and file-list audit (2026-11-06):** Kaggle's public dataset
+  metadata reports `Unknown` for [DIV2K](https://www.kaggle.com/datasets/joe1995/div2k-dataset),
+  [Flickr2K](https://www.kaggle.com/datasets/daehoyang/flickr2k), and
+  [CBSD68](https://www.kaggle.com/datasets/tarekmebrouk/cbsd68); SOTS is
+  [marked "Other (specified in description)"](https://www.kaggle.com/datasets/balraj98/synthetic-objective-testing-set-sots-reside),
+  but its description provides citation/provenance, not an explicit license.
+  The [DIV2K primary page](https://data.vision.ee.ethz.ch/cvl/DIV2K/) says
+  academic research only and that image copyright belongs to original owners,
+  so it is not cleared for commercial use. The [Berkeley BSDS source terms](https://www2.eecs.berkeley.edu/Research/Projects/CS/vision/grouping/segbench/)
+  allow only non-commercial research/education; CBSD68 is a Kaggle `Unknown`
+  mirror, and the precise mapping to that source still needs confirmation.
+  The [NTIRE2017 source repository](https://github.com/LimBee/NTIRE2017)
+  identifies Flickr2K as a dataset used/provided but no separate commercial
+  license was found; Kaggle lists its license as `Unknown`. The [RESIDE/SOTS
+  source page](https://sites.google.com/view/reside-dehaze-datasets/reside-standard)
+  likewise provides no explicit image license in the inspected material.
+  Thus none of those four sources is cleared for commercial use; the unknown
+  terms also do not establish non-commercial research permission.
+  Kaggle lists [Rain13K resized](https://www.kaggle.com/datasets/hngphchi/rain13k-resized)
+  and [Rain13K HDF5](https://www.kaggle.com/datasets/hngphchi/rain13k-h5) as
+  Apache 2.0, and the resized dataset description says so. Apache 2.0 permits
+  commercial use of material actually licensed by an authorized licensor, but
+  the Kaggle card alone does not establish that the uploader can license the
+  underlying images. The user's own HF-derived Rain dataset was not found.
+  Public file-list samples show DIV2K under `DIV2K_train_HR/...`, Flickr2K
+  under `Flickr2K/...`, CBSD68 under `dataset/train/...`, SOTS under
+  `indoor/clear/...`, and Rain13K under `test_resized/...`; a second Rain
+  candidate is a single `dataset.h5`. These are catalog listings only, not
+  attached/runtime-verified inputs. Do not accept a legal agreement or treat
+  research purpose as permission for Unknown/Other sources; obtain the user's
+  decision or rights-holder confirmation before using them.
+- **Trainer controls checked locally:** `_make_optimizer` gives the dictionary
+  its own AdamW group with `weight_decay=0.0`; task Charbonnier normalization
+  defaults on and divides by each task's epoch-1 mean; online coherence loss
+  is included in every training step with coefficient `1e-3`. The Kaggle
+  command must explicitly pass the warmed dictionary checkpoint, keep those
+  controls, and preserve the existing run artifacts. The trainer's coherence
+  acceptance threshold (`--coherence-target`, currently default `0.15`) is
+  separate from the warmup gate (`0.20`); resolve the intended final Stage C
+  coherence acceptance criterion before claiming success.
+- **Next:** Resolve whether to use the Kaggle sources marked Unknown/Other for
+  non-commercial research, and confirm the Rain image rights or provide the
+  user's Rain input. Then attach/inspect the selected Kaggle-native datasets,
+  verify usable paths, build fresh train/validation manifests, export the
+  warmed dictionary checkpoint to persistent notebook output, and launch
+  Stage C with the Stage B rescue checkpoint plus warmed dictionary.
+  Keep dictionary decay at zero, task-loss normalization enabled and online
+  coherence enabled; save to a new run directory. Recompute final coherence
+  independently and inspect per-task validation curves before acceptance.
+- **2026-11-09 addendum (Stage C launch):** Kaggle history probe concluded:
+  NO mu<0.20 warmup checkpoint exists (only verified checkpoint is
+  mu=0.2553, `target_not_met`, from `stage-c-warmup-gpu` v2; the
+  resume-side notebooks never saved a version). Colab T4 cell 5 of
+  `phase7_stage_c_colab.ipynb` repatched in place to: coherence warmup
+  RESUME (up to 30,000 steps, lr 0.03, per-bank target 0.20, `--device
+  cuda`, resumed from the Drive partial checkpoint if present else Stage
+  A) streamed line-by-line to
+  `phase7/stage_c/stage_c_failure.log` on Drive (survives runtime death),
+  auto-skip only when `coherence_warmup.status == target_met`; then Stage
+  C fine-tune with `--steps-per-epoch 50` (batch stays 1; budget halved
+  after the Kaggle session kill) and `--coherence-target 0.20` per-bank
+  gate (obs #39; stale 0.15 removed from this cell). Repo notebook sync
+  pending until run completes.
 
 ### Task 7.2c
 
