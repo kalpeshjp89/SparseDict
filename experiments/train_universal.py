@@ -240,26 +240,80 @@ def _validation_acceptance(
     coherence_target: float,
     eps_psnr: float = 0.0,
     eps_ssim: float = 0.0,
+    monotonic_mode: str = "eps",
 ) -> dict[str, Any]:
-    """Acceptance gates. ``eps_*`` allow tiny task-curve dips (Strategy 4):
-    ``current >= previous - eps`` per validation pair instead of strict
-    monotonicity, separating stochastic noise from real degradation."""
+    """Acceptance gates.
+
+    ``monotonic_mode`` controls the per-task validation monotonicity check:
+    - "strict": current >= previous (no tolerance)
+    - "eps": current >= previous - eps (tiny dip allowed)
+    - "first_vs_final": PSNR/SSIM final >= initial for every task
+    - "moving_avg_3": 3-epoch moving average is non-decreasing
+    - "combined": pass if first_vs_final OR moving_avg_3 holds
+    """
     if not history:
         raise ValueError("cannot evaluate acceptance without completed epochs")
     curves: dict[str, list[tuple[float, float]]] = defaultdict(list)
     for record in history:
         for task, metrics in record["validation"]["tasks"].items():
             curves[task].append((float(metrics["psnr"]), float(metrics["ssim"])))
-    monotonic_tasks = {
-        task: all(
-            current_psnr >= previous_psnr - eps_psnr
-            and current_ssim >= previous_ssim - eps_ssim
-            for (previous_psnr, previous_ssim), (current_psnr, current_ssim) in zip(
-                values, values[1:]
+    # strict / eps: consecutive-pair comparison
+    if monotonic_mode in ("strict", "eps"):
+        monotonic_tasks = {
+            task: all(
+                current_psnr >= previous_psnr - (eps_psnr if monotonic_mode == "eps" else 0.0)
+                and current_ssim >= previous_ssim - (eps_ssim if monotonic_mode == "eps" else 0.0)
+                for (previous_psnr, previous_ssim), (current_psnr, current_ssim) in zip(
+                    values, values[1:]
+                )
             )
-        )
-        for task, values in curves.items()
-    }
+            for task, values in curves.items()
+        }
+    elif monotonic_mode == "first_vs_final":
+        monotonic_tasks = {
+            task: (values[-1][0] >= values[0][0] and values[-1][1] >= values[0][1])
+            for task, values in curves.items()
+        }
+    elif monotonic_mode == "moving_avg_3":
+        monotonic_tasks = {}
+        for task, values in curves.items():
+            if len(values) < 3:
+                monotonic_tasks[task] = True
+                continue
+            # 3-epoch moving average, non-decreasing
+            ma = []
+            for i in range(2, len(values)):
+                ma.append((
+                    (values[i-2][0] + values[i-1][0] + values[i][0]) / 3.0,
+                    (values[i-2][1] + values[i-1][1] + values[i][1]) / 3.0,
+                ))
+            monotonic_tasks[task] = all(
+                ma[i][0] >= ma[i-1][0] - 1e-9 and ma[i][1] >= ma[i-1][1] - 1e-9
+                for i in range(1, len(ma))
+            )
+    elif monotonic_mode == "combined":
+        fvf = {
+            task: (values[-1][0] >= values[0][0] and values[-1][1] >= values[0][1])
+            for task, values in curves.items()
+        }
+        ma3 = {}
+        for task, values in curves.items():
+            if len(values) < 3:
+                ma3[task] = True
+                continue
+            ma = []
+            for i in range(2, len(values)):
+                ma.append((
+                    (values[i-2][0] + values[i-1][0] + values[i][0]) / 3.0,
+                    (values[i-2][1] + values[i-1][1] + values[i][1]) / 3.0,
+                ))
+            ma3[task] = all(
+                ma[i][0] >= ma[i-1][0] - 1e-9 and ma[i][1] >= ma[i-1][1] - 1e-9
+                for i in range(1, len(ma))
+            )
+        monotonic_tasks = {task: fvf[task] or ma3[task] for task in curves}
+    else:
+        raise ValueError(f"unknown monotonic_mode: {monotonic_mode}")
     final_mu = float(history[-1]["validation"]["mutual_coherence_max"])
     coherence_met = final_mu < coherence_target
     validation_met = bool(monotonic_tasks) and all(monotonic_tasks.values())
@@ -268,6 +322,7 @@ def _validation_acceptance(
         "coherence_target": coherence_target,
         "final_mutual_coherence_max": final_mu,
         "coherence_met": coherence_met,
+        "monotonic_mode": monotonic_mode,
         "monotonic_eps_psnr": eps_psnr,
         "monotonic_eps_ssim": eps_ssim,
         "per_task_validation_monotonic": monotonic_tasks,
@@ -324,6 +379,7 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
         "dictionary_lr_scale": args.dictionary_lr_scale,
         "monotonic_eps_psnr": args.monotonic_eps_psnr,
         "monotonic_eps_ssim": args.monotonic_eps_ssim,
+        "monotonic_mode": args.monotonic_mode,
         "normalize_task_losses": args.normalize_task_losses,
         "fine_tune_jitter_steps": args.fine_tune_jitter_steps,
         "entropy_kappa": args.entropy_kappa,
@@ -684,6 +740,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help="Strategy 4: allowed per-task SSIM dip between consecutive validation epochs (0 = strict)",
+    )
+    parser.add_argument(
+        "--monotonic-mode",
+        choices=("strict", "eps", "first_vs_final", "moving_avg_3", "combined"),
+        default="eps",
+        help="monotonicity gate definition (Strategy 4)",
     )
     parser.add_argument(
         "--normalize-task-losses",
@@ -1137,6 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
         args.coherence_target,
         eps_psnr=args.monotonic_eps_psnr,
         eps_ssim=args.monotonic_eps_ssim,
+        monotonic_mode=args.monotonic_mode,
     )
         if args.phase == "fine_tune"
         else {"required": False}
