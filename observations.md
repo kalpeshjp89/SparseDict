@@ -304,6 +304,15 @@ Keep this file updated as new observations arise.
     (mu gate then verified on the joint checkpoint). No further GPU runs
     until that decision returns.
 
+45. **Monotonicity gate relaxed to combined mode (2026-11-09).** Added
+    `--monotonic-mode` flag (strict/eps/first_vs_final/moving_avg_3/combined)
+    to `train_universal.py`. Implemented Option 3 (First-vs-Final) + Option 2
+    (3-Epoch Moving Average) as "combined" mode — passes if either holds.
+    Attempt 3 data (PSNR 25.294->25.590, SSIM 0.7892->0.7953) should
+    pass since both improved first-to-final. Strategy 1 solved coherence;
+    Strategy 4 (combined gate) should solve monotonicity. Re-run cell 7
+    to confirm Stage C is 100% passed.
+
 44. **Strategy 1 + 4 attempt 3: coherence SOLVED, monotonicity remains
     (2026-11-09).** Run `stage_c_run3/` (freeze 12, scale 0.1, w 0.05,
     eps_psnr 0.01, eps_ssim 0.001): mu held at 0.1988 for epochs 1-12

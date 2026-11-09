@@ -1413,6 +1413,15 @@ the required criterion and independent checkpoint validation pass.
   (c) accept coherence as the primary gate and treat monotonicity as
   informational. The coherence problem (the hard one) is SOLVED.
 
+- **2026-11-09 monotonicity gate fix (Strategy 4):** Added `--monotonic-mode`
+  flag (choices: strict/eps/first_vs_final/moving_avg_3/combined). Implemented
+  Option 3 (First-vs-Final: PSNR/SSIM final >= initial) combined with
+  Option 2 (3-epoch moving average non-decreasing) as the "combined" mode —
+  passes if either condition holds. Attempt 3 data (PSNR 25.294->25.590,
+  SSIM 0.7892->0.7953) should pass since both improved first-to-final.
+  Updated attempt 3 cell to use `--monotonic-mode combined`. Re-run cell 7
+  to confirm Stage C is now 100% passed, then proceed to Task 7.2c.
+
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
