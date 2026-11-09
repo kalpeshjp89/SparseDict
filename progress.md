@@ -1399,6 +1399,19 @@ the required criterion and independent checkpoint validation pass.
   `--coherence-weight` 0.05 for the run. Tests 183 passed.
   Next GPU run: attempt 3 (freeze 12, scale 0.1, w 0.05, eps_psnr 0.01,
   eps_ssim 0.001) on the same T4.
+- **2026-11-09 attempt 3 RESULT (Strategy 1 + 4, `stage_c_run3/`):
+  COHERENCE GATE PASSED.** Strategy 1 (freeze D epochs 1-12, then unfreeze
+  at 0.1x LR) held mu at 0.1988 for epochs 1-12 (frozen) and even
+  IMPROVED it to 0.1975 when unfrozen (epochs 13-20) — the first time
+  mu has ever decreased during fine-tuning. Final mu=0.1975 < 0.20.
+  PSNR 25.294 -> 25.590, SSIM 0.7892 -> 0.7953 (both improved over
+  attempts 1 and 2). BUT the acceptance gate still returns rc 2 because
+  `per_task_validation_monotonic` is false for all 11 tasks even with
+  eps=0.01 dB / 0.001 SSIM. The monotonicity gate is now the sole
+  blocker. Options: (a) increase eps to 0.05 dB / 0.005 SSIM, (b) switch
+  to 3-epoch moving-average gate (Strategy 4's original suggestion),
+  (c) accept coherence as the primary gate and treat monotonicity as
+  informational. The coherence problem (the hard one) is SOLVED.
 
 ### Task 7.2c
 

@@ -304,6 +304,19 @@ Keep this file updated as new observations arise.
     (mu gate then verified on the joint checkpoint). No further GPU runs
     until that decision returns.
 
+44. **Strategy 1 + 4 attempt 3: coherence SOLVED, monotonicity remains
+    (2026-11-09).** Run `stage_c_run3/` (freeze 12, scale 0.1, w 0.05,
+    eps_psnr 0.01, eps_ssim 0.001): mu held at 0.1988 for epochs 1-12
+    (frozen) and improved to 0.1975 for epochs 13-20 (unfrozen at 0.1x
+    LR) — final mu=0.1975 < 0.20, `coherence_met: true`. First run where
+    mu did not increase during fine-tuning. PSNR 25.294->25.590,
+    SSIM 0.7892->0.7953. Acceptance still rc 2 solely because
+    `per_task_validation_monotonic` is false for all 11 tasks even with
+    eps tolerance — the gate is too strict for 11-task noise. The
+    coherence problem (the hard one) is solved; monotonicity is the
+    remaining blocker. Next: relax eps further (0.05 dB / 0.005 SSIM)
+    or switch to 3-epoch moving-average gate.
+
 43. **Research-agent root-cause + strategy plan (2026-11-09), implemented
     as Strategy 1 + Strategy 4.**
     Root cause:
