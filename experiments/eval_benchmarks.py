@@ -180,15 +180,17 @@ def compute_ssim(pred: torch.Tensor, target: torch.Tensor) -> float:
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_model(checkpoint_path: Path, device: torch.device) -> MasterMoETopKRestorer:
+def load_model(checkpoint_path: Path, device: torch.device,
+               global_context_dim: int = 0) -> MasterMoETopKRestorer:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model = MasterMoETopKRestorer(
         d=64, atoms_per_expert=1024, top_k=16, noise_std=0.1,
         aux_weight=0.01, entropy_kappa=0.1,
+        global_context_dim=global_context_dim,
     ).to(device)
     state = ckpt.get("model_state_dict")
     if state is not None:
-        model.load_state_dict(state)
+        model.load_state_dict(state, strict=False)
     else:
         # fallback: load dictionary only
         dict_ckpt = ckpt.get("expert_dictionary") or ckpt.get("dictionary")
@@ -355,6 +357,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-side", type=int, default=256, help="max image side length")
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
+    parser.add_argument("--global-context-dim", type=int, default=0)
     parser.add_argument(
         "--baselines", nargs="*", default=[],
         help="baseline names to include (SwinIR, Restormer, HAT-L); "
@@ -369,7 +372,7 @@ def main(argv=None) -> int:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device, global_context_dim=args.global_context_dim)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     summary: dict[str, Any] = {
