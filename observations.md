@@ -286,3 +286,20 @@ Keep this file updated as new observations arise.
     mu<0.20 warmup checkpoint IS now persistent on Drive
     (phase7/stage_c_coherence_retrain/). No GPU crash or OOM occurred
     with batch 1 / steps-per-epoch 50 / expandable_segments.
+
+42. **Coherence drift is dose-responsive but not weight-fixable as-is
+    (2026-11-09).** Attempt 2 (`--coherence-weight 0.01`, run dir
+    `stage_c_run2/`) held mu at 0.1975 for epoch 1 (attempt 1 crossed
+    0.20 immediately) but still finished at 0.2511 (attempt 1: 0.2908);
+    both runs rc 2. Drift slope 1e-3 -> ~+0.0047/epoch; 1e-2 ->
+    ~+0.0028/epoch: sublinear response, task loss dominates dictionary
+    coherence during top-1 fine-tuning. Also first sighting of the
+    acceptance JSON's second gate: `per_task_validation_monotonic` false
+    for all 11 tasks in both runs — the per-task non-decreasing gate
+    reads per-task PSNR/SSIM across every validation epoch and fails on
+    any single-task single-epoch dip. Implication for the research
+    decision: candidate levers are dictionary-LR cap/anneal, dictionary
+    freezing schedule, per-bank adaptive (Lagrangian) coherence weight,
+    dictionary EMA, or a post-fine-tune dictionary-only re-decay pass
+    (mu gate then verified on the joint checkpoint). No further GPU runs
+    until that decision returns.

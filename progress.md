@@ -1375,6 +1375,21 @@ the required criterion and independent checkpoint validation pass.
   and/or a decaying dictionary-LR schedule, or apply a post-fine-tune
   decay pass followed by a short re-adaptation. PSNR/SSIM gains show the
   run was healthy apart from coherence drift.
+- **2026-11-09 Stage C rerun (attempt 2, `--coherence-weight 0.01`,
+  `phase7/stage_c_run2/`):** 20/20 epochs, no crashes. PSNR 25.295 ->
+  25.583, SSIM 0.7892 -> 0.7955 (again improving). mu held 0.1975 at
+  epoch 1 but still crept to **0.2511** final -> acceptance gate FAILED
+  (rc 2). Dose-response vs attempt 1: drift rate ~+0.0047/epoch at
+  weight 1e-3 vs ~+0.0028/epoch at 1e-2 — a 10x weight only
+  sublinearly slows the drift; the task loss keeps winning. New evidence
+  from the trainer's acceptance report: `per_task_validation_monotonic`
+  is FALSE for ALL 11 tasks in both instances of run 1 and run 2 — the
+  per-task non-decreasing-PSNR/SSIM gate has never passed; tiny epoch
+  dips on individual tasks violate it even while the scores trend up.
+  Artifacts preserved: `stage_c_run2/{latest.pt, metrics.jsonl,
+  trainer_status.json, stage_c_failure.log}`. Handed to research agent
+  (2026-11-09) for a regularization/curriculum decision before any
+  further GPU spend.
 
 ### Task 7.2c
 
