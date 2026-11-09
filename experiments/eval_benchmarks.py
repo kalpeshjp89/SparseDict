@@ -97,11 +97,11 @@ def degrade(clean: torch.Tensor, task: str, seed: int = 0) -> torch.Tensor:
         sigma = int(task.replace("denoise", ""))
         return _add_gaussian_noise(clean, sigma, seed)
     if task == "derain":
-        # Simple rain streak synthesis (reuse micro_loader logic if available)
         try:
             from data.micro_loader import _make_rain_layer
-            rain = _make_rain_layer(clean.shape[-2], clean.shape[-1], seed=seed)
-            return (clean * (1 - rain) + rain * 0.8).clamp(0.0, 1.0)
+            gen = torch.Generator(device="cpu").manual_seed(seed)
+            rain = _make_rain_layer(clean, gen)
+            return (clean + 0.3 * rain).clamp(0.0, 1.0)
         except Exception:
             return _add_gaussian_noise(clean, 25, seed)
     if task == "dehaze":
@@ -211,7 +211,7 @@ def run_inference(
         out_h, out_w = h * scale, w * scale
     else:
         out_h, out_w = h, w
-    output = model(
+    output, _ = model(
         degraded.unsqueeze(0).to(device),
         output_size=(out_h, out_w),
         scale_factor=scale,
@@ -233,7 +233,7 @@ def measure_latency(
     inp = degraded.unsqueeze(0).to(device)
     # warmup
     for _ in range(5):
-        model(inp, output_size=(out_h, out_w), scale_factor=scale)
+        model(inp, output_size=(out_h, out_w), scale_factor=scale)[0]
     if device.type == "cuda":
         torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True) if device.type == "cuda" else None
@@ -243,14 +243,14 @@ def measure_latency(
     for _ in range(iterations):
         if device.type == "cuda":
             start.record()
-        model(inp, output_size=(out_h, out_w), scale_factor=scale)
+        model(inp, output_size=(out_h, out_w), scale_factor=scale)[0]
         if device.type == "cuda":
             end.record()
             torch.cuda.synchronize()
             total_ms += start.elapsed_time(end)
         else:
             t0 = time.perf_counter()
-            model(inp, output_size=(out_h, out_w), scale_factor=scale)
+            model(inp, output_size=(out_h, out_w), scale_factor=scale)[0]
             total_ms += (time.perf_counter() - t0) * 1000.0
     return total_ms / iterations
 
