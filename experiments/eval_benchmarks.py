@@ -106,7 +106,8 @@ def degrade(clean: torch.Tensor, task: str, seed: int = 0) -> torch.Tensor:
             return _add_gaussian_noise(clean, 25, seed)
     if task == "dehaze":
         # Simple haze: reduce contrast + add white veil
-        t = 0.6 + torch.rand(1).item() * 0.2
+        gen = torch.Generator(device="cpu").manual_seed(seed)
+        t = 0.6 + torch.rand(1, generator=gen).item() * 0.2
         return (clean * t + (1 - t)).clamp(0.0, 1.0)
     if task == "lowlight":
         return (clean * 0.3).clamp(0.0, 1.0)
@@ -122,7 +123,7 @@ def degrade(clean: torch.Tensor, task: str, seed: int = 0) -> torch.Tensor:
 class BenchmarkDataset(Dataset):
     """Load clean images from a directory for benchmarking."""
 
-    def __init__(self, root: Path, max_images: int = 0):
+    def __init__(self, root: Path, max_images: int = 0, max_side: int = 256):
         self.root = Path(root)
         self.paths = sorted(
             p for p in self.root.rglob("*")
@@ -130,13 +131,20 @@ class BenchmarkDataset(Dataset):
         )
         if max_images > 0:
             self.paths = self.paths[:max_images]
+        self.max_side = max_side
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, str]:
         with Image.open(self.paths[idx]) as img:
-            return _to_tensor(img), self.paths[idx].name
+            rgb = img.convert("RGB")
+            # Resize to avoid OOM on large images
+            w, h = rgb.size
+            if max(w, h) > self.max_side:
+                scale = self.max_side / max(w, h)
+                rgb = rgb.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+            return _to_tensor(rgb), self.paths[idx].name
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +215,12 @@ def run_inference(
 ) -> torch.Tensor:
     scale = TASK_SCALES[task]
     h, w = degraded.shape[-2:]
+    # Pad to even dimensions
+    pad_h = (2 - h % 2) % 2
+    pad_w = (2 - w % 2) % 2
+    if pad_h or pad_w:
+        degraded = F.pad(degraded, (0, pad_w, 0, pad_h), mode="reflect")
+    h, w = degraded.shape[-2:]
     if scale > 1:
         out_h, out_w = h * scale, w * scale
     else:
@@ -216,7 +230,13 @@ def run_inference(
         output_size=(out_h, out_w),
         scale_factor=scale,
     )
-    return output.squeeze(0).cpu().clamp(0.0, 1.0)
+    result = output.squeeze(0).cpu().clamp(0.0, 1.0)
+    # Crop back to original size (scaled)
+    if scale > 1:
+        result = result[:, :h*scale - pad_h*scale, :w*scale - pad_w*scale]
+    else:
+        result = result[:, :h - pad_h, :w - pad_w]
+    return result
 
 
 def measure_latency(
@@ -228,6 +248,11 @@ def measure_latency(
 ) -> float:
     """Mean latency in ms over ``iterations`` CUDA-event-timed runs."""
     scale = TASK_SCALES[task]
+    h, w = degraded.shape[-2:]
+    pad_h = (2 - h % 2) % 2
+    pad_w = (2 - w % 2) % 2
+    if pad_h or pad_w:
+        degraded = F.pad(degraded, (0, pad_w, 0, pad_h), mode="reflect")
     h, w = degraded.shape[-2:]
     out_h, out_w = (h * scale, w * scale) if scale > 1 else (h, w)
     inp = degraded.unsqueeze(0).to(device)
@@ -266,11 +291,13 @@ def evaluate_dataset(
     tasks: list[str],
     device: torch.device,
     max_images: int = 0,
+    max_side: int = 256,
     iterations: int = 100,
 ) -> dict[str, Any]:
     dataset_dir = data_root / dataset_name.upper().replace("URBAN100", "Urban100")
     # Try common directory names
-    for candidate in [dataset_name, dataset_name.upper(), dataset_name.capitalize()]:
+    for candidate in [dataset_name, dataset_name.upper(), dataset_name.capitalize(),
+                      dataset_name.lower()]:
         p = data_root / candidate
         if p.is_dir():
             dataset_dir = p
@@ -278,7 +305,7 @@ def evaluate_dataset(
     if not dataset_dir.is_dir():
         return {"error": f"dataset directory not found: {dataset_dir}"}
 
-    ds = BenchmarkDataset(dataset_dir, max_images=max_images)
+    ds = BenchmarkDataset(dataset_dir, max_images=max_images, max_side=max_side)
     if len(ds) == 0:
         return {"error": f"no images found in {dataset_dir}"}
 
@@ -325,6 +352,7 @@ def main(argv=None) -> int:
     parser.add_argument("--tasks", nargs="+", default=TASKS)
     parser.add_argument("--datasets", nargs="+", default=BENCHMARK_DATASETS)
     parser.add_argument("--max-images", type=int, default=0, help="0 = all")
+    parser.add_argument("--max-side", type=int, default=256, help="max image side length")
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     parser.add_argument(
@@ -356,7 +384,7 @@ def main(argv=None) -> int:
         print(f"\n=== Evaluating {dataset_name} ===")
         result = evaluate_dataset(
             model, dataset_name, args.data_root, args.tasks, device,
-            max_images=args.max_images, iterations=args.iterations,
+            max_images=args.max_images, max_side=args.max_side, iterations=args.iterations,
         )
         summary["datasets"][dataset_name] = result
         if "error" in result:
