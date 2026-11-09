@@ -761,28 +761,57 @@ def main(argv: list[str] | None = None) -> int:
             f"{latest_path} already exists; use --resume or choose a new output directory"
         )
     if args.resume and latest_path.is_file():
-        optimizer = _make_optimizer(model, args)
-        (
-            start_epoch,
-            first_batch,
-            global_step,
-            history,
-            best_psnr,
-            resumed_partial,
-        ) = _restore_checkpoint(
-            latest_path,
-            model,
-            optimizer,
-            device,
-            args.phase,
-            _model_config(args),
-            training_config,
-        )
-        print(
-            f"Resuming {args.phase} at epoch={start_epoch + 1}, "
-            f"batch={first_batch}, step={global_step}",
-            flush=True,
-        )
+        try:
+            optimizer = _make_optimizer(model, args)
+            (
+                start_epoch,
+                first_batch,
+                global_step,
+                history,
+                best_psnr,
+                resumed_partial,
+            ) = _restore_checkpoint(
+                latest_path,
+                model,
+                optimizer,
+                device,
+                args.phase,
+                _model_config(args),
+                training_config,
+            )
+            print(
+                f"Resuming {args.phase} at epoch={start_epoch + 1}, "
+                f"batch={first_batch}, step={global_step}",
+                flush=True,
+            )
+        except (ValueError, KeyError, RuntimeError, TypeError) as exc:
+            print(
+                f"Could not resume from {latest_path} ({exc}); "
+                "starting a fresh run.",
+                flush=True,
+            )
+            if args.phase == "warmup" and args.init_checkpoint is None:
+                parser.error("warmup requires --init-checkpoint from Stage A dictionary seeding")
+            if args.init_checkpoint is not None:
+                if not args.init_checkpoint.is_file():
+                    parser.error(f"initial checkpoint does not exist: {args.init_checkpoint}")
+                initialized = torch.load(
+                    args.init_checkpoint, map_location=device, weights_only=False
+                )
+                model_state = initialized.get("model_state_dict")
+                if model_state is not None:
+                    model.load_state_dict(model_state)
+                else:
+                    _load_dictionary(model, args.init_checkpoint, device)
+            if args.dictionary_checkpoint is not None:
+                if not args.dictionary_checkpoint.is_file():
+                    parser.error(
+                        f"dictionary checkpoint does not exist: {args.dictionary_checkpoint}"
+                    )
+                _load_dictionary(model, args.dictionary_checkpoint, device)
+            optimizer = _make_optimizer(model, args)
+            start_epoch, first_batch, global_step, history, best_psnr = 0, 0, 0, [], -math.inf
+            resumed_partial = {}
     else:
         if args.phase == "warmup" and args.init_checkpoint is None:
             parser.error("warmup requires --init-checkpoint from Stage A dictionary seeding")
@@ -806,7 +835,6 @@ def main(argv: list[str] | None = None) -> int:
         optimizer = _make_optimizer(model, args)
         start_epoch, first_batch, global_step, history, best_psnr = 0, 0, 0, [], -math.inf
         resumed_partial = {}
-
     step_log = args.output_dir / "steps.jsonl"
     epoch_log = args.output_dir / "metrics.jsonl"
     task_log = args.output_dir / "metrics_by_task.csv"
