@@ -69,9 +69,25 @@ def _rng_state() -> dict[str, Any]:
 
 def _restore_rng_state(state: dict[str, Any]) -> None:
     random.setstate(state["python"])
-    torch.set_rng_state(state["torch"])
+    torch_state = state["torch"]
+    if isinstance(torch_state, (list, tuple)):
+        torch_state = torch.tensor(torch_state, dtype=torch.uint8)
+    elif not isinstance(torch_state, torch.Tensor):
+        torch_state = torch.as_tensor(torch_state, dtype=torch.uint8)
+    elif torch_state.dtype != torch.uint8:
+        torch_state = torch_state.to(torch.uint8).contiguous()
+    torch.set_rng_state(torch_state)
     if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda_states = []
+        for cuda_state in state["cuda"]:
+            if isinstance(cuda_state, (list, tuple)):
+                cuda_state = torch.tensor(cuda_state, dtype=torch.uint8)
+            elif not isinstance(cuda_state, torch.Tensor):
+                cuda_state = torch.as_tensor(cuda_state, dtype=torch.uint8)
+            elif cuda_state.dtype != torch.uint8:
+                cuda_state = cuda_state.to(torch.uint8).contiguous()
+            cuda_states.append(cuda_state)
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def _ssim(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
