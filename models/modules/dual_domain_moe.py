@@ -76,6 +76,7 @@ class DualDomainMoEDictionary(nn.Module):
         reduction_ratio: int = 4,
         top_k: int = 16,
         noise_std: float = 0.1,
+        global_context_dim: int = 0,
     ) -> None:
         super().__init__()
         if channels <= 0 or channels % reduction_ratio:
@@ -91,6 +92,7 @@ class DualDomainMoEDictionary(nn.Module):
         self.atoms_per_expert = int(atoms_per_expert)
         self.d_k = self.channels // int(reduction_ratio)
         self.top_k = int(top_k)
+        self.global_context_dim = int(global_context_dim)
 
         # Atom rows are C-dimensional; banks [0, 1] are spatial, [2] is
         # wavelet low-pass, and [3] is Fourier high-frequency.
@@ -102,6 +104,7 @@ class DualDomainMoEDictionary(nn.Module):
             num_experts=4,
             active_experts=1,
             noise_std=noise_std,
+            global_context_dim=global_context_dim,
         )
 
         domains = ("spatial", "wavelet", "fourier")
@@ -175,6 +178,7 @@ class DualDomainMoEDictionary(nn.Module):
         feature_map: torch.Tensor,
         return_gates: bool = False,
         scale_factor: int = 1,
+        global_context: torch.Tensor | None = None,
     ):
         if feature_map.ndim != 4:
             raise ValueError(
@@ -208,7 +212,8 @@ class DualDomainMoEDictionary(nn.Module):
         tokens = feature_map.flatten(2).transpose(1, 2)
         spatial_bank = self.dictionary[:2, :active_atoms]
         gates = self.spatial_router(
-            tokens, mode="token", scale_factor=scale_factor
+            tokens, mode="token", scale_factor=scale_factor,
+            global_context=global_context,
         )
         spatial_gates = gates[..., :2]
         has_spatial_route = spatial_gates.sum(dim=-1, keepdim=True) > 0

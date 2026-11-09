@@ -16,6 +16,7 @@ from models.modules.entropy_gate import EntropyGate
 from models.modules.moe_dict import MoEDictionary
 from models.modules.router import DegradationAwareRouter
 from models.modules.topk_select import sparse_topk_attention
+from models.modules.global_context import GlobalContextStem, FiLMLayer
 
 
 class ParallelDilatedAffineHead(nn.Module):
@@ -260,6 +261,7 @@ class MasterMoETopKRestorer(nn.Module):
         coherence_lambda_hinge: float = 10.0,
         entropy_kappa: float = 0.2,
         use_fused_kernel: bool = False,
+        global_context_dim: int = 0,
     ) -> None:
         super().__init__()
         if d <= 0 or reduction_ratio <= 0 or d % reduction_ratio:
@@ -276,6 +278,7 @@ class MasterMoETopKRestorer(nn.Module):
         self.top_k = int(top_k)
         self.d_k = self.d // reduction_ratio
         self.use_fused_kernel = bool(use_fused_kernel)
+        self.global_context_dim = int(global_context_dim)
 
         self.stem = nn.Conv2d(3, self.d, kernel_size=3, padding=1)
         self.entropy_gate = EntropyGate(
@@ -291,6 +294,7 @@ class MasterMoETopKRestorer(nn.Module):
             reduction_ratio=reduction_ratio,
             top_k=self.top_k,
             noise_std=noise_std,
+            global_context_dim=self.global_context_dim,
         )
         self.affine_head = ParallelDilatedAffineHead(hidden_dim=self.d)
         self.attention_projection = nn.Linear(self.d, self.d)
@@ -309,6 +313,17 @@ class MasterMoETopKRestorer(nn.Module):
             lambda_fp=coherence_lambda_fp,
             lambda_hinge=coherence_lambda_hinge,
         )
+        if self.global_context_dim > 0:
+            self.global_context_stem = GlobalContextStem(self.d, thumbnail_size=64)
+            self.film_layer = FiLMLayer(self.d)
+            if self.d != self.global_context_dim:
+                self.gc_proj = nn.Linear(self.d, self.global_context_dim)
+            else:
+                self.gc_proj = nn.Identity()
+        else:
+            self.global_context_stem = None
+            self.film_layer = None
+            self.gc_proj = None
         nn.init.normal_(self.reconstruction.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.reconstruction.bias)
         for head in self.super_resolution_heads.values():
@@ -365,6 +380,14 @@ class MasterMoETopKRestorer(nn.Module):
 
         features = self.stem(image)
         batch, channels, height, width = features.shape
+
+        v_global = None
+        v_global_proj = None
+        if self.global_context_stem is not None:
+            v_global = self.global_context_stem(image)
+            v_global_proj = self.gc_proj(v_global)
+            features = self.film_layer(features, v_global)
+
         tokens = features.flatten(2).transpose(1, 2)
 
         gate_result = self.entropy_gate(tokens)
@@ -374,7 +397,8 @@ class MasterMoETopKRestorer(nn.Module):
             batch, channels, height, width
         )
         attention_map, gates = self.dual_domain(
-            attention_input, return_gates=True, scale_factor=scale_factor
+            attention_input, return_gates=True, scale_factor=scale_factor,
+            global_context=v_global_proj,
         )
         attention_tokens = attention_map.flatten(2).transpose(1, 2)
 

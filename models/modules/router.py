@@ -24,6 +24,7 @@ class DegradationAwareRouter(nn.Module):
         hidden_dim: int | None = None,
         noise_std: float = 0.1,
         scale_dim: int = 16,
+        global_context_dim: int = 0,
     ) -> None:
         super().__init__()
         self.d = int(hp.D.value if d is None else d)
@@ -32,6 +33,7 @@ class DegradationAwareRouter(nn.Module):
         self.hidden_dim = self.d if hidden_dim is None else int(hidden_dim)
         self.noise_std = float(noise_std)
         self.scale_dim = int(scale_dim)
+        self.global_context_dim = int(global_context_dim)
 
         if self.d <= 0:
             raise ValueError(f"d must be positive; got {self.d}")
@@ -48,22 +50,34 @@ class DegradationAwareRouter(nn.Module):
             raise ValueError(f"noise_std must be non-negative; got {self.noise_std}")
         if self.scale_dim <= 0:
             raise ValueError(f"scale_dim must be positive; got {self.scale_dim}")
+        if self.global_context_dim < 0:
+            raise ValueError(f"global_context_dim must be non-negative; got {self.global_context_dim}")
 
-        self.fc1 = nn.Linear(self.d + self.scale_dim, self.hidden_dim)
+        router_input_dim = self.d + self.scale_dim + self.global_context_dim
+        self.fc1 = nn.Linear(router_input_dim, self.hidden_dim)
         self.fc2 = nn.Linear(self.hidden_dim, self.num_experts)
         self.scale_embedding = nn.Embedding(5, self.scale_dim)
+        if self.global_context_dim > 0:
+            self.global_context_proj = nn.Linear(self.global_context_dim, self.global_context_dim)
+        else:
+            self.global_context_proj = None
 
     def forward(
         self,
         x: torch.Tensor,
         mode: str = "token",
         scale_factor: int | torch.Tensor | None = None,
+        global_context: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return sparse gates shaped (B, E) or (B, N, E).
 
         ``x`` is a token tensor shaped (B, N, d). In ``image`` mode tokens
         are mean-pooled before routing; in ``token`` mode each token is routed
         independently. Gaussian logit jitter is applied only during training.
+
+        ``global_context`` is an optional (B, global_context_dim) vector
+        providing global image-level information (e.g., downsampled thumbnail
+        embedding) to improve routing for non-local degradations.
         """
         if x.ndim != 3 or x.size(-1) != self.d:
             raise ValueError(f"expected X of shape (B, N, {self.d}), got {tuple(x.shape)}")
@@ -95,6 +109,28 @@ class DegradationAwareRouter(nn.Module):
                 -1, features.size(1), -1
             )
         features = torch.cat((features, scale_features), dim=-1)
+
+        # Global context injection for non-local degradations (haze, low-light)
+        if self.global_context_dim > 0:
+            if global_context is not None:
+                gc = global_context
+                if gc.ndim == 2 and gc.size(0) == x.size(0):
+                    if gc.size(1) != self.global_context_dim:
+                        # Project if dimension mismatch
+                        if self.global_context_proj is not None:
+                            gc = self.global_context_proj(gc)
+                    if mode == "token":
+                        gc = gc.unsqueeze(1).expand(-1, features.size(1), -1)
+                    features = torch.cat((features, gc), dim=-1)
+            else:
+                # Zero-pad if no global context provided
+                zeros = features.new_zeros(
+                    (features.size(0), features.size(1) if mode == "token" else 1,
+                     self.global_context_dim)
+                )
+                if mode == "image":
+                    zeros = zeros.squeeze(1)
+                features = torch.cat((features, zeros), dim=-1)
 
         logits = self.fc2(F.gelu(self.fc1(features)))
         if self.training and self.noise_std > 0:
