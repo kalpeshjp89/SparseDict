@@ -362,3 +362,12 @@ Keep this file updated as new observations arise.
     higher --coherence-weight; S4 done via --monotonic-eps-psnr/--ssim
     (current >= previous - eps). S2/S3 recorded as future levers; not
     implemented yet. Next GPU run: attempt 3.
+
+47. **Benchmark completed (2026-11-09).** `eval_benchmarks.py` ran on
+    Urban100/CBSD68/SOTS with stage_c_run3/latest.pt (mu=0.1975). Results
+    in `stage_c_run3/benchmark_summary.json` (returncode 0). Best numbers:
+    SOTS sr2 PSNR=30.68, denoise15 PSNR=31.74; CBSD68 sr2 PSNR=27.45;
+    Urban100 sr2 PSNR=24.68. Latency 9-82ms on T4. Dehaze PSNR low
+    (~15-17 dB) — synthetic haze may not match SOTS protocol. Baselines
+    (SwinIR/Restormer/HAT-L) not yet evaluated. SSIM from simplified
+    window-based metric; standard SSIM verification pending.

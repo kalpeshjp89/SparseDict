@@ -1412,6 +1412,30 @@ the required criterion and independent checkpoint validation pass.
   to 3-epoch moving-average gate (Strategy 4's original suggestion),
   (c) accept coherence as the primary gate and treat monotonicity as
   informational. The coherence problem (the hard one) is SOLVED.
+
+- **2026-11-09 benchmark (Task 7.2c, `stage_c_run3/benchmark_summary.json`):
+  returncode 0.** Ran `eval_benchmarks.py` on Urban100/CBSD68/SOTS (max-side 256,
+  100 CUDA-event iterations). Results (PSNR / SSIM / latency):
+  Urban100: sr2 24.6793/0.9993/15.56ms, sr3 19.8135/0.9979/11.04ms,
+  sr4 18.8922/0.9970/10.99ms, denoise15 29.3789/0.9996/68.27ms,
+  denoise25 26.8502/0.9994/67.97ms, denoise50 22.6142/0.9969/68.54ms,
+  derain 26.6409/0.9983/69.47ms, dehaze 15.3531/0.8712/69.66ms,
+  jpeg 24.5600/0.9990/70.43ms.
+  CBSD68: sr2 27.4486/0.9998/16.15ms, sr3 21.7241/0.9988/10.79ms,
+  sr4 21.3521/0.9985/9.38ms, denoise15 29.2536/0.9996/73.92ms,
+  denoise25 26.8405/0.9992/73.19ms, denoise50 22.7259/0.9963/73.25ms,
+  derain 26.4148/0.9979/73.32ms, dehaze 14.8785/0.8469/73.47ms,
+  jpeg 25.3370/0.9991/73.67ms.
+  SOTS: sr2 30.6762/0.9999/17.17ms, sr3 26.8888/0.9996/13.76ms,
+  sr4 25.5402/0.9994/9.57ms, denoise15 31.7407/0.9999/81.96ms,
+  denoise25 28.3928/0.9997/81.87ms, denoise50 23.3704/0.9982/81.69ms,
+  derain 27.8703/0.9990/81.55ms, dehaze 16.9925/0.9281/81.76ms,
+  jpeg 28.5881/0.9996/81.91ms.
+  FLOP reduction measured via scripts/measure_flops.py. Baselines
+  (SwinIR/Restormer/HAT-L) pending — not available in repo. SSIM values
+  are from the script's simplified window-based SSIM; may differ from
+  standard implementations. Note: dehaze PSNR is low (~15-17 dB) — the
+  synthetic haze degradation may not match SOTS dehazing protocol.
 - **2026-11-09 monotonicity gate fix (Strategy 4):** Added `--monotonic-mode`
   flag (choices: strict/eps/first_vs_final/moving_avg_3/combined). Implemented
   Option 3 (First-vs-Final) + Option 2 (3-Epoch Moving Average) as the
