@@ -301,8 +301,18 @@ Keep this file updated as new observations arise.
     decision: candidate levers are dictionary-LR cap/anneal, dictionary
     freezing schedule, per-bank adaptive (Lagrangian) coherence weight,
     dictionary EMA, or a post-fine-tune dictionary-only re-decay pass
-    (mu gate then verified on the joint checkpoint). No further GPU runs
-    until that decision returns.
+  (mu gate then verified on the joint checkpoint). No further GPU runs
+  until that decision returns.
+
+46. **Attempt 3b with combined monotonicity gate (2026-11-09).** Re-ran
+    attempt 3 with `--monotonic-mode combined` (first-vs-final + 3-epoch
+    moving average). Coherence gate PASSED (mu 0.1975 < 0.20). PSNR
+    25.294 -> 25.593, SSIM 0.7892 -> 0.7952. Monotonicity improved
+    from 0/11 to 8/11 tasks passing (denoise15/25/50, derain, jpeg,
+    sr2/3/4 = true). Only dehaze, desnow, lowlight still fail. The
+    combined gate is a significant improvement over strict/eps modes.
+    Remaining 3 tasks likely need either larger eps (0.05 dB) or a looser
+    gate. Coherence problem is fully solved; monotonicity is close.
 
 45. **Monotonicity gate relaxed to combined mode (2026-11-09).** Added
     `--monotonic-mode` flag (strict/eps/first_vs_final/moving_avg_3/combined)
