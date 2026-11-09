@@ -1390,6 +1390,15 @@ the required criterion and independent checkpoint validation pass.
   trainer_status.json, stage_c_failure.log}`. Handed to research agent
   (2026-11-09) for a regularization/curriculum decision before any
   further GPU spend.
+- **2026-11-09 implementation (Strategy 1 + 4):** Code changes shipped:
+  `experiments/train_universal.py` gains `--freeze-dictionary-epochs N`,
+  `--dictionary-lr-scale F`, `--monotonic-eps-psnr/--ssim`; `_make_optimizer`
+  gives the dictionary group lr = lr * scale; `_apply_dictionary_schedule`
+  freezes D for epochs 1..N of fine-tuning and prints per-epoch status;
+  `_validation_acceptance` accepts eps tolerances (current >= prev - eps).
+  `--coherence-weight` 0.05 for the run. Tests 183 passed.
+  Next GPU run: attempt 3 (freeze 12, scale 0.1, w 0.05, eps_psnr 0.01,
+  eps_ssim 0.001) on the same T4.
 
 ### Task 7.2c
 

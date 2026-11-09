@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from experiments.train_universal import (
+    _apply_dictionary_schedule,
     _charbonnier_baselines,
     _effective_aux_weight,
     _make_optimizer,
@@ -35,7 +36,9 @@ def test_validation_metrics_report_psnr_ssim_and_l1():
 
 def test_optimizer_disables_weight_decay_for_dictionary_only():
     model = MasterMoETopKRestorer(d=8, atoms_per_expert=8, top_k=2)
-    args = SimpleNamespace(learning_rate=1e-3, weight_decay=0.02)
+    args = SimpleNamespace(
+        learning_rate=1e-3, weight_decay=0.02, dictionary_lr_scale=1.0
+    )
 
     optimizer = _make_optimizer(model, args)
     dictionary = model.dual_domain.dictionary
@@ -114,3 +117,50 @@ def test_validation_acceptance_requires_coherence_and_monotonic_task_metrics():
     result = _validation_acceptance(history, 0.15)
     assert not result["passed"]
     assert not result["per_task_validation_monotonic"]["sr2"]
+
+
+def test_dictionary_schedule_freezes_then_unfreezes_with_scaled_lr():
+    from types import SimpleNamespace
+
+    model = MasterMoETopKRestorer(d=8, atoms_per_expert=8, top_k=2)
+    args = SimpleNamespace(
+        phase="fine_tune",
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        dictionary_lr_scale=0.1,
+        freeze_dictionary_epochs=2,
+    )
+    optimizer = _make_optimizer(model, args)
+    dictionary = model.dual_domain.dictionary
+
+    _apply_dictionary_schedule(optimizer, model, args, epoch=0)
+    assert not dictionary.requires_grad
+    _apply_dictionary_schedule(optimizer, model, args, epoch=1)
+    assert not dictionary.requires_grad
+    _apply_dictionary_schedule(optimizer, model, args, epoch=2)
+    assert dictionary.requires_grad
+    group = [g for g in optimizer.param_groups if any(p is dictionary for p in g["params"])][0]
+    assert group["lr"] == 1e-4
+
+
+def test_acceptance_eps_allows_tiny_task_dips():
+    history = [
+        {
+            "validation": {
+                "mutual_coherence_max": 0.10,
+                "tasks": {"sr2": {"psnr": 25.0, "ssim": 0.80}},
+            }
+        },
+        {
+            "validation": {
+                "mutual_coherence_max": 0.10,
+                "tasks": {"sr2": {"psnr": 24.995, "ssim": 0.7999}},
+            }
+        },
+    ]
+    strict = _validation_acceptance(history, 0.20)
+    assert not strict["passed"]
+    tolerant = _validation_acceptance(history, 0.20, eps_psnr=0.01, eps_ssim=0.001)
+    assert tolerant["passed"]
+    assert tolerant["monotonic_eps_psnr"] == 0.01
+    assert tolerant["per_task_validation_monotonic"]["sr2"]

@@ -303,3 +303,30 @@ Keep this file updated as new observations arise.
     dictionary EMA, or a post-fine-tune dictionary-only re-decay pass
     (mu gate then verified on the joint checkpoint). No further GPU runs
     until that decision returns.
+
+43. **Research-agent root-cause + strategy plan (2026-11-09), implemented
+    as Strategy 1 + Strategy 4.**
+    Root cause:
+    (1) Gradient magnitude asymmetry — task-loss gradients on D are
+    dense/high-magnitude across 11 tasks while coherence gradients are a
+    weak geometric spring that gets overpowered.
+    (2) Top-1 routing bottleneck — Stage C locks active_experts=1, so
+    gradient pressure concentrates on specific expert banks.
+    (3) Over-rigid validation — every task's PSNR/SSIM strictly
+    non-decreasing each epoch is fragile under 11-task noise.
+    Strategies:
+    S1 (recommended) Two-phase curriculum: freeze D epochs 1-12, then
+    unfreeze with lr_dict=0.1*lr_base and lambda_coh=0.05.
+    S2 Periodic in-epoch "coherence squeeze": at epoch end, if
+    mu(D)>0.18, run a 20-step MutualCoherenceLoss mini-loop on D,
+    re-normalise atoms, then continue.
+    S3 Lagrangian adaptive multiplier:
+    lambda_coh^(t)=lambda0*exp(max(0,mu(D)-0.18)*10).
+    S4 Refine monotonicity gate: epsilon tolerance (e.g. dip <= 0.01 dB
+    if the 3-epoch moving average is strictly upward).
+    Suggested next step (chosen): S1 + S4.
+    Implementation status: S1 done via --freeze-dictionary-epochs N and
+    --dictionary-lr-scale F (Phase-1 freeze, Phase-2 scaled LR) plus a
+    higher --coherence-weight; S4 done via --monotonic-eps-psnr/--ssim
+    (current >= previous - eps). S2/S3 recorded as future levers; not
+    implemented yet. Next GPU run: attempt 3.

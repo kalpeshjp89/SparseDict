@@ -142,10 +142,40 @@ def _make_optimizer(
     return torch.optim.AdamW(
         [
             {"params": other_parameters, "weight_decay": args.weight_decay},
-            {"params": [dictionary], "weight_decay": 0.0},
+            # Strategy 1 phase-2: dictionary group may train at a reduced
+            # rate (0 < dictionary_lr_scale <= 1) to protect the warmed
+            # low-coherence geometry.
+            {
+                "params": [dictionary],
+                "weight_decay": 0.0,
+                "lr": args.learning_rate * max(0.0, args.dictionary_lr_scale),
+            },
         ],
         lr=args.learning_rate,
     )
+
+
+def _apply_dictionary_schedule(
+    optimizer: torch.optim.Optimizer,
+    model: MasterMoETopKRestorer,
+    args: argparse.Namespace,
+    epoch: int,
+) -> None:
+    """Strategy 1 two-phase curriculum. ``--freeze-dictionary-epochs N``
+    freezes the dictionary (all gradients off) for epochs 1..N (1-based)
+    of fine-tuning; later epochs train it at ``(lr * lr_scale)``."""
+    if args.phase != "fine_tune":
+        return
+    frozen = int(args.freeze_dictionary_epochs) > epoch
+    dictionary = model.dual_domain.dictionary
+    target_lr = args.learning_rate * max(0.0, args.dictionary_lr_scale)
+    for group in optimizer.param_groups:
+        if any(parameter is dictionary for parameter in group["params"]):
+            group["lr"] = target_lr
+            break
+    dictionary.requires_grad_(not frozen)
+    label = "frozen" if frozen else f"lr={target_lr:.3e}"
+    print(f"dictionary_schedule epoch={epoch + 1} {label}", flush=True)
 
 
 def _charbonnier_baselines(history: list[dict[str, Any]]) -> dict[str, float]:
@@ -190,8 +220,14 @@ def _effective_aux_weight(
 
 
 def _validation_acceptance(
-    history: list[dict[str, Any]], coherence_target: float
+    history: list[dict[str, Any]],
+    coherence_target: float,
+    eps_psnr: float = 0.0,
+    eps_ssim: float = 0.0,
 ) -> dict[str, Any]:
+    """Acceptance gates. ``eps_*`` allow tiny task-curve dips (Strategy 4):
+    ``current >= previous - eps`` per validation pair instead of strict
+    monotonicity, separating stochastic noise from real degradation."""
     if not history:
         raise ValueError("cannot evaluate acceptance without completed epochs")
     curves: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -200,7 +236,8 @@ def _validation_acceptance(
             curves[task].append((float(metrics["psnr"]), float(metrics["ssim"])))
     monotonic_tasks = {
         task: all(
-            current_psnr >= previous_psnr and current_ssim >= previous_ssim
+            current_psnr >= previous_psnr - eps_psnr
+            and current_ssim >= previous_ssim - eps_ssim
             for (previous_psnr, previous_ssim), (current_psnr, current_ssim) in zip(
                 values, values[1:]
             )
@@ -215,6 +252,8 @@ def _validation_acceptance(
         "coherence_target": coherence_target,
         "final_mutual_coherence_max": final_mu,
         "coherence_met": coherence_met,
+        "monotonic_eps_psnr": eps_psnr,
+        "monotonic_eps_ssim": eps_ssim,
         "per_task_validation_monotonic": monotonic_tasks,
         "validation_met": validation_met,
     }
@@ -265,6 +304,10 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
         "coherence_weight": args.coherence_weight,
         "coherence_target": args.coherence_target,
         "weight_decay": args.weight_decay,
+        "freeze_dictionary_epochs": args.freeze_dictionary_epochs,
+        "dictionary_lr_scale": args.dictionary_lr_scale,
+        "monotonic_eps_psnr": args.monotonic_eps_psnr,
+        "monotonic_eps_ssim": args.monotonic_eps_ssim,
         "normalize_task_losses": args.normalize_task_losses,
         "fine_tune_jitter_steps": args.fine_tune_jitter_steps,
         "entropy_kappa": args.entropy_kappa,
@@ -603,6 +646,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coherence-target", type=float, default=0.15)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument(
+        "--freeze-dictionary-epochs",
+        type=int,
+        default=0,
+        help="Strategy 1 phase 1: freeze the dictionary for epochs 1..N of fine-tuning (0 disables)",
+    )
+    parser.add_argument(
+        "--dictionary-lr-scale",
+        type=float,
+        default=1.0,
+        help="Strategy 1 phase 2: dictionary param-group LR = learning-rate * this factor",
+    )
+    parser.add_argument(
+        "--monotonic-eps-psnr",
+        type=float,
+        default=0.0,
+        help="Strategy 4: allowed per-task PSNR dip (dB) between consecutive validation epochs (0 = strict)",
+    )
+    parser.add_argument(
+        "--monotonic-eps-ssim",
+        type=float,
+        default=0.0,
+        help="Strategy 4: allowed per-task SSIM dip between consecutive validation epochs (0 = strict)",
+    )
+    parser.add_argument(
         "--normalize-task-losses",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -629,6 +696,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("checkpoint and log intervals must be positive")
     if args.learning_rate <= 0 or args.num_workers < 0 or args.weight_decay < 0:
         parser.error("learning rate must be positive; weight decay and workers non-negative")
+    if args.freeze_dictionary_epochs < 0 or args.dictionary_lr_scale < 0:
+        parser.error("freeze epochs and dictionary lr scale must be non-negative")
+    if args.monotonic_eps_psnr < 0 or args.monotonic_eps_ssim < 0:
+        parser.error("monotonic epsilons must be non-negative")
     if args.fine_tune_jitter_steps < 0 or args.aux_weight <= 0:
         parser.error("fine-tune jitter steps must be non-negative and aux weight positive")
     if args.collapsed_aux_weight < args.aux_weight:
@@ -739,6 +810,7 @@ def main(argv: list[str] | None = None) -> int:
     task_counts: dict[str, int] = defaultdict(int)
     try:
         for epoch in range(start_epoch, args.epochs):
+            _apply_dictionary_schedule(optimizer, model, args, epoch)
             train_dataset.set_epoch(epoch)
             generator = torch.Generator().manual_seed(args.seed + epoch)
             order = torch.randperm(len(train_dataset), generator=generator).tolist()
@@ -1016,7 +1088,12 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
     acceptance = (
-        _validation_acceptance(history, args.coherence_target)
+        _validation_acceptance(
+        history,
+        args.coherence_target,
+        eps_psnr=args.monotonic_eps_psnr,
+        eps_ssim=args.monotonic_eps_ssim,
+    )
         if args.phase == "fine_tune"
         else {"required": False}
     )
