@@ -143,6 +143,7 @@ def _model_config(args: argparse.Namespace) -> dict[str, int | float]:
         "noise_std": noise_std,
         "aux_weight": args.aux_weight,
         "entropy_kappa": args.entropy_kappa,
+        "global_context_dim": args.global_context_dim,
     }
 
 
@@ -383,6 +384,7 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
         "normalize_task_losses": args.normalize_task_losses,
         "fine_tune_jitter_steps": args.fine_tune_jitter_steps,
         "entropy_kappa": args.entropy_kappa,
+        "global_context_dim": args.global_context_dim,
         "collapsed_aux_weight": args.collapsed_aux_weight,
         "collapsed_expert_threshold": args.collapsed_expert_threshold,
         "checkpoint_every_steps": args.checkpoint_every_steps,
@@ -672,7 +674,7 @@ def _restore_checkpoint(
             f"{path} training configuration or manifest differs from the "
             "current run; use the original settings or a new output directory"
         )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     _restore_rng_state(checkpoint["rng_state"])
     return (
@@ -716,6 +718,8 @@ def main(argv: list[str] | None = None) -> int:
         help="weight for the raw Task 6.1 Frame-Potential/Welch loss",
     )
     parser.add_argument("--coherence-target", type=float, default=0.15)
+    parser.add_argument("--global-context-dim", type=int, default=0,
+                        help="enable global context injection (0=disabled)")
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument(
         "--freeze-dictionary-epochs",
@@ -814,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
         noise_std=_model_config(args)["noise_std"],
         aux_weight=args.aux_weight,
         entropy_kappa=args.entropy_kappa,
+        global_context_dim=args.global_context_dim,
     ).to(device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     latest_path = args.output_dir / "latest.pt"
@@ -862,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 model_state = initialized.get("model_state_dict")
                 if model_state is not None:
-                    model.load_state_dict(model_state)
+                    model.load_state_dict(model_state, strict=False)
                 else:
                     _load_dictionary(model, args.init_checkpoint, device)
             if args.dictionary_checkpoint is not None:
@@ -885,7 +890,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             model_state = initialized.get("model_state_dict")
             if model_state is not None:
-                model.load_state_dict(model_state)
+                model.load_state_dict(model_state, strict=False)
             else:
                 _load_dictionary(model, args.init_checkpoint, device)
         if args.dictionary_checkpoint is not None:
