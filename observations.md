@@ -410,3 +410,22 @@ Keep this file updated as new observations arise.
     `scripts/debug_diagnostics.py` created for pre-debugging verification.
     Tests: 183 passed. Next: retrain with --global-context-dim 64 and
     --steps-per-epoch 500 for 50-100 epochs to address dehazing/low-light.
+
+50. **Stage C attempt 4 progress + crash analysis (2026-11-10).** Attempt 4
+    (patch 144, 2000 steps/epoch, epochs 50, global-context 64, freeze-D 12,
+    combined gate) ran on Colab T4 for 15 epochs before crashing. Results
+    Strong improvement: PSNR 24.831 (e1) -> 27.290 (e15), SSIM 0.786 ->
+    0.8418, mu held 0.1988 through frozen epochs 1-12, then 0.1977/0.1985/
+    0.2038 (e13-15) after unfreeze at lr 2e-5. Coherence gate holding.
+    Already beats attempt 3b (25.59 PSNR / 0.7952 SSIM) by wide margin.
+    Crash at epoch 16: FileNotFoundError for Outdoor-Rain train target
+    part_1/12528.jpg — a Drive image vanished mid-run (present at dataset
+    init, gone in __getitem__ during epoch 16). Not a training bug.
+    Fix (commit 35a0b04): UniversalRestorationDataset.__getitem__ now falls
+    back to deterministic neighbouring rows on OSError/ValueError instead
+    of crashing; all manifest rows failing => explicit error. Checkpoints
+    (latest.pt every 25 steps, best.pt) safe on Drive; resume continues
+    from epoch 16 checkpoint (step 30000). Prior attempts in log also
+    recorded: 12:11:45/12:52:58 unrecognized --global-context-dim (stale
+    clone), 12:55 patch 128 sr3 divisibility error, 12:58 size-mismatch
+    router fc1 (fixed by 625ae49 skipping mismatched keys).
