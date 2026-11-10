@@ -394,6 +394,35 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _load_model_state_compatible(
+    model, state, context: str
+) -> list[str]:
+    """Load a state dict, skipping keys whose shapes do not match the model.
+
+    Needed when the architecture grows (e.g. ``--global-context-dim`` widens
+    the router input): checkpoints from before the change are still usable,
+    and only the newly-shaped modules keep their fresh initialization.
+    Returns the list of skipped keys.
+    """
+    model_state = model.state_dict()
+    skipped = []
+    filtered = {}
+    for key, value in state.items():
+        expected = model_state.get(key)
+        if expected is not None and tuple(expected.shape) != tuple(value.shape):
+            skipped.append(key)
+            continue
+        filtered[key] = value
+    if skipped:
+        print(
+            f"[init] skipping {len(skipped)} size-mismatched keys from "
+            f"{context}: {', '.join(skipped)}",
+            flush=True,
+        )
+    model.load_state_dict(filtered, strict=False)
+    return skipped
+
+
 def _load_dictionary(
     model: MasterMoETopKRestorer, checkpoint_path: Path, device: torch.device
 ) -> None:
@@ -674,7 +703,9 @@ def _restore_checkpoint(
             f"{path} training configuration or manifest differs from the "
             "current run; use the original settings or a new output directory"
         )
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    _load_model_state_compatible(
+        model, checkpoint["model_state_dict"], context="resume checkpoint"
+    )
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     _restore_rng_state(checkpoint["rng_state"])
     return (
@@ -867,7 +898,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 model_state = initialized.get("model_state_dict")
                 if model_state is not None:
-                    model.load_state_dict(model_state, strict=False)
+                    _load_model_state_compatible(
+                        model, model_state, context="init checkpoint"
+                    )
                 else:
                     _load_dictionary(model, args.init_checkpoint, device)
             if args.dictionary_checkpoint is not None:
@@ -890,7 +923,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             model_state = initialized.get("model_state_dict")
             if model_state is not None:
-                model.load_state_dict(model_state, strict=False)
+                _load_model_state_compatible(
+                    model, model_state, context="init checkpoint"
+                )
             else:
                 _load_dictionary(model, args.init_checkpoint, device)
         if args.dictionary_checkpoint is not None:
