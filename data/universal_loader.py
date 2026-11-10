@@ -100,9 +100,7 @@ class UniversalRestorationDataset(Dataset[RestorationSample]):
             raise ValueError(f"epoch must be non-negative; got {epoch}")
         self.epoch = int(epoch)
 
-    def __getitem__(self, index: int) -> RestorationSample:
-        if not 0 <= index < len(self.rows):
-            raise IndexError(index)
+    def _load_sample(self, index: int) -> RestorationSample:
         path, task, paired_input_path = self.rows[index]
         scale = TASK_SCALES[task]
         generator = torch.Generator(device="cpu").manual_seed(
@@ -232,3 +230,18 @@ class UniversalRestorationDataset(Dataset[RestorationSample]):
             ).contiguous().to(torch.float32).div_(255)
 
         return RestorationSample(low_quality, clean, task, scale)
+
+    def __getitem__(self, index: int) -> RestorationSample:
+        if not 0 <= index < len(self.rows):
+            raise IndexError(index)
+        # Datasets live on network mounts (Drive) where images can vanish
+        # mid-run (e.g. Outdoor-Rain 12528.jpg during Stage C attempt 4).
+        # A multi-hour training run must not crash on one missing file, so
+        # fall back to deterministic neighbouring rows.
+        length = len(self.rows)
+        for attempt in range(length):
+            try:
+                return self._load_sample((index + attempt) % length)
+            except (OSError, ValueError):
+                continue
+        raise OSError(f"all {length} manifest rows failed to load for index {index}")
