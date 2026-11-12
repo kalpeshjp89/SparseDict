@@ -24,7 +24,71 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.universal_loader import TASK_SCALES, UniversalRestorationDataset
+from models.losses import MutualCoherenceLoss
 from models.moe_topk_restorer import MasterMoETopKRestorer, mutual_coherence_of
+
+
+def lagrangian_coherence_weight(
+    mu: float, lambda0: float, threshold: float, gain: float
+) -> float:
+    """Lagrangian adaptive coherence multiplier (Strategy S3).
+
+    ``lambda_coh(t) = lambda0 * exp(max(0, mu - threshold) * gain)``.
+
+    Dormant while ``mu <= threshold`` (factor 1.0); scales exponentially the
+    moment coherence drifts past the threshold, pushing atoms apart without
+    any manual retuning of the static weight.
+    """
+    excess = max(0.0, float(mu) - float(threshold))
+    return float(lambda0) * math.exp(excess * float(gain))
+
+
+def _coherence_squeeze(
+    model: MasterMoETopKRestorer,
+    *,
+    steps: int,
+    learning_rate: float,
+    max_weight: float = 0.0,
+    max_temperature: float = 0.05,
+) -> dict[str, float | int]:
+    """Periodic coherence squeeze (Strategy S2).
+
+    Runs a short optimizer loop over *only* ``MutualCoherenceLoss`` on the
+    dictionary parameters, re-normalizing atom rows after each step, then
+    restores the dictionary's previous ``requires_grad`` state. Used at
+    epoch boundaries whenever ``mu > threshold`` so the dictionary keeps
+    drifting back toward the coherence target instead of compromising
+    between task reconstruction and atom separation.
+    """
+    if steps <= 0:
+        raise ValueError(f"steps must be positive; got {steps}")
+    if learning_rate <= 0:
+        raise ValueError(f"learning_rate must be positive; got {learning_rate}")
+    dictionary = model.dual_domain.dictionary
+    optimizer = torch.optim.Adam([dictionary], lr=learning_rate, weight_decay=0.0)
+    coherence_loss = MutualCoherenceLoss(
+        lambda_max=max_weight, max_temperature=max_temperature
+    )
+    previous_requires_grad = dictionary.requires_grad
+    dictionary.requires_grad_(True)
+    initial_mu = float(mutual_coherence_of(dictionary.detach()).item())
+    for _ in range(int(steps)):
+        optimizer.zero_grad(set_to_none=True)
+        loss = coherence_loss(dictionary).sum()
+        if not bool(torch.isfinite(loss)):
+            raise FloatingPointError("non-finite coherence loss during squeeze")
+        loss.backward()
+        optimizer.step()
+        with torch.no_grad():
+            dictionary.copy_(torch.nn.functional.normalize(dictionary, dim=-1))
+    final_mu = float(mutual_coherence_of(dictionary.detach()).item())
+    dictionary.requires_grad_(previous_requires_grad)
+    return {
+        "steps": int(steps),
+        "learning_rate": float(learning_rate),
+        "initial_mu": initial_mu,
+        "final_mu": final_mu,
+    }
 
 
 class FixedOrderSampler(Sampler[int]):
@@ -376,6 +440,14 @@ def _training_config(args: argparse.Namespace) -> dict[str, Any]:
         "gdl_weight": args.gdl_weight,
         "coherence_weight": args.coherence_weight,
         "coherence_target": args.coherence_target,
+        "coherence_adaptive": args.coherence_adaptive,
+        "coherence_lagrangian_threshold": args.coherence_lagrangian_threshold,
+        "coherence_lagrangian_gain": args.coherence_lagrangian_gain,
+        "coherence_squeeze": args.coherence_squeeze,
+        "coherence_squeeze_threshold": args.coherence_squeeze_threshold,
+        "coherence_squeeze_steps": args.coherence_squeeze_steps,
+        "coherence_squeeze_lr": args.coherence_squeeze_lr,
+        "mu_check_steps": args.mu_check_steps,
         "weight_decay": args.weight_decay,
         "freeze_dictionary_epochs": args.freeze_dictionary_epochs,
         "dictionary_lr_scale": args.dictionary_lr_scale,
@@ -690,6 +762,7 @@ def _restore_checkpoint(
     expected_phase: str,
     expected_config: dict[str, int | float],
     expected_training_config: dict[str, Any],
+    ignore_config_mismatch: bool = False,
 ) -> tuple[int, int, int, list[dict[str, Any]], float, dict[str, Any]]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if checkpoint.get("phase") != expected_phase:
@@ -700,10 +773,26 @@ def _restore_checkpoint(
             f"{checkpoint.get('model_config')}"
         )
     if checkpoint.get("training_config") != expected_training_config:
-        raise ValueError(
-            f"{path} training configuration or manifest differs from the "
-            "current run; use the original settings or a new output directory"
+        differing = sorted(
+            key
+            for key in set(checkpoint.get("training_config", {}))
+            | set(expected_training_config)
+            if checkpoint.get("training_config", {}).get(key)
+            != expected_training_config.get(key)
         )
+        if ignore_config_mismatch:
+            print(
+                f"[resume] training config differs ({', '.join(differing)}); "
+                "continuing (--resume-ignore-config-mismatch)",
+                flush=True,
+            )
+        else:
+            raise ValueError(
+                f"{path} training configuration or manifest differs from the "
+                f"current run (changed: {', '.join(differing)}); use the "
+                "original settings, pass --resume-ignore-config-mismatch, "
+                "or start a new output directory"
+            )
     _load_model_state_compatible(
         model, checkpoint["model_state_dict"], context="resume checkpoint"
     )
@@ -782,6 +871,60 @@ def main(argv: list[str] | None = None) -> int:
         choices=("strict", "eps", "first_vs_final", "moving_avg_3", "combined"),
         default="eps",
         help="monotonicity gate definition (Strategy 4)",
+    )
+    parser.add_argument(
+        "--coherence-adaptive",
+        choices=("off", "lagrangian"),
+        default="off",
+        help="Strategy S3: scale the coherence weight by lagrangian_coherence_weight(mu)",
+    )
+    parser.add_argument(
+        "--coherence-lagrangian-threshold",
+        type=float,
+        default=0.18,
+        help="mu above this threshold activates the lagrangian multiplier (dormant below)",
+    )
+    parser.add_argument(
+        "--coherence-lagrangian-gain",
+        type=float,
+        default=15.0,
+        help="exponential gain in the lagrangian multiplier",
+    )
+    parser.add_argument(
+        "--coherence-squeeze",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Strategy S2: run a short coherence-only optimizer loop at epoch end when mu > threshold",
+    )
+    parser.add_argument(
+        "--coherence-squeeze-threshold",
+        type=float,
+        default=0.195,
+        help="epoch-end mu above which the coherence squeeze fires",
+    )
+    parser.add_argument(
+        "--coherence-squeeze-steps",
+        type=int,
+        default=10,
+        help="coherence-only optimizer steps per squeeze",
+    )
+    parser.add_argument(
+        "--coherence-squeeze-lr",
+        type=float,
+        default=0.005,
+        help="learning rate for the coherence squeeze optimizer (warmup decay recipe)",
+    )
+    parser.add_argument(
+        "--mu-check-steps",
+        type=int,
+        default=25,
+        help="recompute dictionary mu every N steps when --coherence-adaptive is on",
+    )
+    parser.add_argument(
+        "--resume-ignore-config-mismatch",
+        action="store_true",
+        help="allow resume when training_config differs (e.g. new schedule flags); "
+        "the differing keys are printed and the run continues from the checkpoint",
     )
     parser.add_argument(
         "--normalize-task-losses",
@@ -877,6 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.phase,
                 _model_config(args),
                 training_config,
+                ignore_config_mismatch=args.resume_ignore_config_mismatch,
             )
             print(
                 f"Resuming {args.phase} at epoch={start_epoch + 1}, "
@@ -951,6 +1095,23 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     epoch = start_epoch
     batch_index = first_batch - 1
+    # Strategy S3 state: current dictionary mu and the lagrangian-scaled
+    # coherence weight recomputed every --mu-check-steps.
+    coherence_adaptive = args.coherence_adaptive == "lagrangian"
+    current_mu = 0.0
+    if coherence_adaptive:
+        if history:
+            current_mu = float(history[-1]["validation"]["mutual_coherence_max"])
+        else:
+            current_mu = float(
+                mutual_coherence_of(model.dual_domain.dictionary.detach()).item()
+            )
+        print(
+            f"[lagrangian] initial mu={current_mu:.4f} "
+            f"lambda_coh={lagrangian_coherence_weight(current_mu, args.coherence_weight, args.coherence_lagrangian_threshold, args.coherence_lagrangian_gain):.4f}",
+            flush=True,
+        )
+    effective_coherence_weight = float(args.coherence_weight)
     totals: dict[str, dict[str, float]] = defaultdict(
         lambda: defaultdict(float)
     )
@@ -1037,11 +1198,27 @@ def main(argv: list[str] | None = None) -> int:
                 weighted_load_balance = losses["load_balance"] * (
                     effective_aux_weight / args.aux_weight
                 )
+                if coherence_adaptive and (
+                    global_step % max(1, args.mu_check_steps) == 0
+                    or batch_index == skip_batches
+                ):
+                    current_mu = float(
+                        mutual_coherence_of(
+                            model.dual_domain.dictionary.detach()
+                        ).item()
+                    )
+                if coherence_adaptive:
+                    effective_coherence_weight = lagrangian_coherence_weight(
+                        current_mu,
+                        args.coherence_weight,
+                        args.coherence_lagrangian_threshold,
+                        args.coherence_lagrangian_gain,
+                    )
                 total_loss = (
                     normalized_charbonnier
                     + args.gdl_weight * losses["gradient_difference"]
                     + weighted_load_balance
-                    + args.coherence_weight * losses["coherence"]
+                    + effective_coherence_weight * losses["coherence"]
                 )
                 if not bool(torch.isfinite(total_loss)):
                     raise FloatingPointError(
@@ -1092,6 +1269,12 @@ def main(argv: list[str] | None = None) -> int:
                                 normalized_charbonnier.detach().item()
                             ),
                             "effective_aux_weight": effective_aux_weight,
+                            "effective_coherence_weight": (
+                                effective_coherence_weight
+                                if coherence_adaptive
+                                else None
+                            ),
+                            "mu_current": (current_mu if coherence_adaptive else None),
                             "expert_load": details["expert_load"].tolist(),
                             "entropy_active_fraction": float(
                                 details["entropy_active_fraction"].item()
@@ -1160,6 +1343,31 @@ def main(argv: list[str] | None = None) -> int:
                 args.validation_samples_per_task,
                 args.seed,
             )
+            # Strategy S2: periodic coherence squeeze at epoch boundaries.
+            squeeze_record: dict[str, float | int] | None = None
+            if (
+                args.coherence_squeeze
+                and validation["mutual_coherence_max"]
+                > args.coherence_squeeze_threshold
+            ):
+                squeeze_record = _coherence_squeeze(
+                    model,
+                    steps=args.coherence_squeeze_steps,
+                    learning_rate=args.coherence_squeeze_lr,
+                )
+                post_squeeze_mu = float(
+                    mutual_coherence_of(model.dual_domain.dictionary.detach()).item()
+                )
+                validation["mutual_coherence_max"] = post_squeeze_mu
+                if coherence_adaptive:
+                    current_mu = post_squeeze_mu
+                print(
+                    f"[squeeze] epoch={epoch + 1} "
+                    f"mu {squeeze_record['initial_mu']:.4f} -> "
+                    f"{post_squeeze_mu:.4f} "
+                    f"({args.coherence_squeeze_steps} steps @ lr {args.coherence_squeeze_lr})",
+                    flush=True,
+                )
             epoch_record = {
                 "phase": args.phase,
                 "epoch": epoch + 1,
@@ -1172,6 +1380,10 @@ def main(argv: list[str] | None = None) -> int:
                 "training_by_task": train_summary,
                 "charbonnier_baselines": charbonnier_baselines,
                 "validation": validation,
+                "coherence_squeeze": squeeze_record,
+                "effective_coherence_weight": (
+                    effective_coherence_weight if coherence_adaptive else None
+                ),
                 "elapsed_seconds": time.monotonic() - started,
                 "learning_rate": optimizer.param_groups[0]["lr"],
             }
@@ -1182,7 +1394,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"phase={args.phase} epoch={epoch + 1}/{args.epochs} "
                 f"step={global_step} validation_psnr={validation['mean_psnr']:.3f} "
                 f"ssim={validation['mean_ssim']:.4f} "
-                f"mu={validation['mutual_coherence_max']:.4f}",
+                f"mu={validation['mutual_coherence_max']:.4f}"
+                + (
+                    f" lambda_coh={lagrangian_coherence_weight(validation['mutual_coherence_max'], args.coherence_weight, args.coherence_lagrangian_threshold, args.coherence_lagrangian_gain):.4f}"
+                    if coherence_adaptive
+                    else ""
+                ),
                 flush=True,
             )
             if validation["mean_psnr"] > best_psnr:

@@ -164,3 +164,66 @@ def test_acceptance_eps_allows_tiny_task_dips():
     assert tolerant["passed"]
     assert tolerant["monotonic_eps_psnr"] == 0.01
     assert tolerant["per_task_validation_monotonic"]["sr2"]
+
+
+def test_lagrangian_coherence_weight_dormant_below_threshold_then_exponential():
+    import math
+
+    from experiments.train_universal import lagrangian_coherence_weight
+
+    # Dormant while mu <= threshold.
+    assert lagrangian_coherence_weight(0.17, 0.05, 0.18, 15.0) == pytest.approx(0.05)
+    assert lagrangian_coherence_weight(0.18, 0.05, 0.18, 15.0) == pytest.approx(0.05)
+    # Exponential past the threshold: lambda0 * exp(excess * gain).
+    assert lagrangian_coherence_weight(0.2169, 0.05, 0.18, 15.0) == pytest.approx(
+        0.05 * math.exp((0.2169 - 0.18) * 15.0)
+    )
+    # Monotonically increasing in mu and gain.
+    assert lagrangian_coherence_weight(0.23, 0.05, 0.18, 15.0) > (
+        lagrangian_coherence_weight(0.20, 0.05, 0.18, 15.0)
+    )
+
+
+def test_coherence_squeeze_lowers_mu_and_renormalizes_atoms():
+    from experiments.train_universal import _coherence_squeeze
+    from models.moe_topk_restorer import mutual_coherence_of
+
+    torch.manual_seed(7)
+    model = MasterMoETopKRestorer(d=16, atoms_per_expert=16, top_k=2)
+    dictionary = model.dual_domain.dictionary
+    dictionary.requires_grad_(False)
+    before = float(mutual_coherence_of(dictionary.detach()).item())
+
+    record = _coherence_squeeze(
+        model, steps=10, learning_rate=0.005, max_temperature=0.05
+    )
+
+    after = float(mutual_coherence_of(dictionary.detach()).item())
+    assert record["steps"] == 10
+    assert record["learning_rate"] == pytest.approx(0.005)
+    assert record["initial_mu"] == pytest.approx(before)
+    assert after < before  # squeeze pulls mu down
+    # Atom rows are unit-normalized after the squeeze.
+    norms = dictionary.detach().norm(dim=-1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+    # requires_grad state is restored.
+    assert dictionary.requires_grad is False
+
+
+def test_coherence_squeeze_restores_requires_grad_true():
+    from experiments.train_universal import _coherence_squeeze
+
+    model = MasterMoETopKRestorer(d=8, atoms_per_expert=8, top_k=2)
+    model.dual_domain.dictionary.requires_grad_(True)
+    _coherence_squeeze(model, steps=2, learning_rate=0.005)
+    assert model.dual_domain.dictionary.requires_grad is True
+
+
+def test_coherence_squeeze_rejects_invalid_arguments():
+    from experiments.train_universal import _coherence_squeeze
+
+    model = MasterMoETopKRestorer(d=8, atoms_per_expert=8, top_k=2)
+    with pytest.raises(ValueError):
+        _coherence_squeeze(model, steps=0, learning_rate=0.005)
+    with pytest.raises(ValueError):
+        _coherence_squeeze(model, steps=5, learning_rate=0.0)
