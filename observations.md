@@ -489,3 +489,27 @@ Keep this file updated as new observations arise.
     requires --resume-ignore-config-mismatch. Tests: 187 passed / 36
     skipped (+4 new: lagrangian math, squeeze lowers mu + renormalizes +
     restores requires_grad, invalid-arg rejection).
+
+54. **Coherence squeeze bug found and disabled; rollback to e23 best
+    (2026-11-12).** The S2 epoch-end squeeze fired at e24 and RAISED mu
+    0.2191 -> 0.2330 instead of lowering it. Root cause: with lambda_max=0
+    the loss is frame-potential + Welch-hinge only; on over-complete atom
+    banks the frame potential's interior minimum equalizes all off-diagonal
+    entries (pushing small ones up), which can raise the MAX — exactly what
+    the MutualCoherenceLoss docstring warns. The proven warmup recipe
+    requires the smooth-max limb (lambda_max=64, tau small) to concentrate
+    gradient on the most collinear pairs. Fix 3db5a06: _coherence_squeeze
+    defaults now lambda_max=64.0, max_temperature=0.005 (warmup-decay
+    recipe). User decision: do NOT run the squeeze inside the training
+    loop at all — with the dictionary frozen (epochs 24-35) mu cannot
+    drift, so the squeeze is unnecessary and was harming; relaunch uses
+    --no-coherence-squeeze. Meanwhile epoch 23 (pre-squeeze) had validated
+    at PSNR 27.620 / SSIM 0.8492 / mu 0.2185 — dominates e24 (27.492 /
+    0.8487 / 0.2330) on ALL metrics, so latest.pt was restored from
+    best.pt (epoch 23, step 46000; mid-e25 partial saved as
+    latest_e25_partial_backup.pt) and training resumed at epoch=24,
+    step=46000 with mu 0.2185, lambda_coh 0.0890, dictionary frozen.
+    End-of-run plan (user-approved): after e50, pull mu (0.2185) back
+    <= 0.20 with the proven scripts/warmup_coherence.py decay recipe
+    (lr 0.001-0.005, tau 0.005) on the final checkpoint, then Task 7.2c
+    benchmarking on the result.
