@@ -1482,6 +1482,20 @@ the required criterion and independent checkpoint validation pass.
   coherence weight on a future pass). Best so far 27.546/0.8450 (e20),
   wide margin over attempt 3b (25.593/0.7952). Run ongoing.
 
+- **2026-11-12 attempt 4 interventions (stop at ~e21/22, mu 0.2169):**
+  User stopped the run (mu drifting up 0.2038 -> 0.2169 by e21; gate needs
+  mu <= 0.20 at e50) and directed three proactive interventions
+  (d129679, obs #53): (1) dictionary freeze extended 12 -> 35 epochs,
+  unfreeze final ~15 epochs at dictionary-lr-scale 0.01 (was 0.1);
+  (2) Lagrangian adaptive coherence weight lambda_coh = lambda0 *
+  exp(max(0, mu - 0.18) * 15) — dormant <= 0.18, exponential past it
+  (mu 0.2169 -> lambda 0.087 vs static 0.05); (3) epoch-end coherence
+  squeeze when mu > 0.195: 10-step MutualCoherenceLoss-only Adam loop
+  (lr 0.005) + atom-row renormalization, post-squeeze mu recorded.
+  Epoch-12 checkpoint was never saved (freeze ended at e12), so resume
+  is from the ~e21/22 latest.pt with `--resume-ignore-config-mismatch`
+  (new flag; config-mismatch otherwise still raises). Tests 187 passed.
+
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
