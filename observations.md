@@ -429,3 +429,22 @@ Keep this file updated as new observations arise.
     recorded: 12:11:45/12:52:58 unrecognized --global-context-dim (stale
     clone), 12:55 patch 128 sr3 divisibility error, 12:58 size-mismatch
     router fc1 (fixed by 625ae49 skipping mismatched keys).
+
+51. **Root cause of silent resume failures found (2026-11-12).** Symptom:
+    "Could not resume ... (RNG state must be a torch.ByteTensor); starting
+    a fresh run." Root cause: _restore_checkpoint used
+    torch.load(map_location=device) with device=cuda, which relocates ALL
+    checkpoint tensors (including the RNG uint8 ByteTensor) to CUDA;
+    torch.set_rng_state requires a CPU ByteTensor. The earlier dtype-only
+    fix (796ca0b) did not catch it because dtype was already uint8 — only
+    the device was wrong. This silently invalidated EVERY resume since the
+    graceful-fallback commit (4b14c0a): attempt 3b and the 2026-11-10
+    attempt-4 relaunch were fresh runs, not resumes. Fix (d5fa9b1): load
+    resume checkpoints with map_location='cpu' and force RNG states to
+    cpu/uint8/contiguous in _restore_rng_state. Consequence of the Nov 12
+    relaunch: fresh run started and began overwriting run4 checkpoints;
+    interrupted in time; best.pt (epoch-15 model, PSNR 27.290, SSIM
+    0.8418) preserved as best_e15_backup.pt on Drive; fresh-run latest.pt
+    backed up as latest_freshrun_backup.pt. Recovery: copy
+    best_e15_backup.pt over latest.pt and re-run cell 7 — resume continues
+    at epoch 16 with the e15 weights, optimizer state, history, and RNG.
