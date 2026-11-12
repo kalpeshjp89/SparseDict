@@ -446,5 +446,19 @@ Keep this file updated as new observations arise.
     interrupted in time; best.pt (epoch-15 model, PSNR 27.290, SSIM
     0.8418) preserved as best_e15_backup.pt on Drive; fresh-run latest.pt
     backed up as latest_freshrun_backup.pt. Recovery: copy
-    best_e15_backup.pt over latest.pt and re-run cell 7 — resume continues
+    best_e15_backup.pt over latest.pt and re-run cell 7 - resume continues
     at epoch 16 with the e15 weights, optimizer state, history, and RNG.
+
+52. **Attempt 4 resumed and progressing (2026-11-12).** After the d5fa9b1
+    fix, latest.pt was restored from best_e15_backup.pt (epoch 15, step
+    30000, best PSNR 27.290, RNG verified cpu uint8) and cell 7 relaunched:
+    confirmed "epoch=16, batch=0, step=30000" - true resume, no fallback.
+    Epochs 16-20: PSNR 27.170/27.182/27.420/27.340/27.546; SSIM
+    0.8361/0.8408/0.8428/0.8427/0.8450; mu 0.2084/0.2117/0.2142/0.2154/
+    0.2157. Best so far 27.546/0.8450 (e20), wide margin over attempt 3b
+    (25.593/0.7952). Watch item: mu drifting UP (0.2038 -> 0.2157 since
+    unfreeze); coherence gate needs mu <= 0.20 at e50 - if it keeps
+    climbing past ~0.23 by e30, raise coherence weight on a future pass.
+    Keep-alive (window.__ka 60s) re-verified active. Kaggle-credentials
+    notebook cell repurposed as diagnostic/restore utility (datasets all
+    on Drive; no Kaggle needed).

@@ -1459,24 +1459,57 @@ the required criterion and independent checkpoint validation pass.
   Updated attempt 3 cell to use `--monotonic-mode combined`. Re-run cell 7
   to confirm Stage C is now 100% passed, then proceed to Task 7.2c.
 
+- **2026-11-10/12 attempt 4 (global context + scaled training):** Config:
+  `--epochs 50 --steps-per-epoch 2000 --patch-size 144 --coherence-weight
+  0.05 --coherence-target 0.20 --freeze-dictionary-epochs 12
+  --dictionary-lr-scale 0.1 --monotonic-mode combined
+  --global-context-dim 64` (GlobalContextStem + FiLM + router conditioning
+  for non-local degradations). Output: `phase7/stage_c_run4/`.
+  Epochs 1-15 (2026-11-10): PSNR 24.831 -> 27.290, SSIM 0.7861 -> 0.8418,
+  mu frozen at 0.1988 (epochs 1-12), then 0.1977/0.1985/0.2038 (e13-15)
+  after unfreeze at dictionary lr 2e-5. Crashed at epoch 16 on a vanished
+  Drive image (Outdoor-Rain 12528.jpg); fixed by dataset row-fallback
+  (35a0b04). A same-day relaunch silently started a FRESH run — root
+  cause found 2026-11-12: `torch.load(map_location=cuda)` relocated the
+  RNG ByteTensor off CPU, so resume failed into the graceful fallback
+  (d5fa9b1 fixes: cpu map_location + cpu-forced RNG restore). Epoch-15
+  model preserved as `best_e15_backup.pt`; resume restored and verified
+  (epoch=16, batch=0, step=30000).
+  Epochs 16-20 (2026-11-12): PSNR 27.170 / 27.182 / 27.420 / 27.340 /
+  27.546; SSIM 0.8361 / 0.8408 / 0.8428 / 0.8427 / 0.8450; mu 0.2084 ->
+  0.2157 (drifting UP from 0.2038 at e15; watch: coherence gate needs
+  mu <= 0.20 at e50 — if still climbing past ~0.23 by e30, raise
+  coherence weight on a future pass). Best so far 27.546/0.8450 (e20),
+  wide margin over attempt 3b (25.593/0.7952). Run ongoing.
+
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
-- **Status:** Blocked; not implemented or run.
-- **Files:** `experiments/eval_benchmarks.py`, `results/benchmark_summary.json`.
+- **Status (2026-11-09):** Implemented and executed (returncode 0) on
+  Colab T4 against the attempt-3b checkpoint. Re-run pending after
+  attempt 4 completes to refresh numbers.
+- **Files:** `experiments/eval_benchmarks.py`,
+  `results/benchmark_summary.json` (on Drive:
+  `phase7/stage_c_run3/benchmark_summary.json`).
 - **Acceptance:** Evaluate SR x2/x3/x4, denoising sigma=15/25/50,
   deraining, dehazing, and JPEG cleanup; compare against SwinIR, Restormer,
   and HAT-L on Urban100/CBSD68/SOTS; record latency via CUDA events over
   100 iterations; export PSNR, SSIM, FLOP reduction, and latency
   comparisons to `results/benchmark_summary.json` executed automatically
   by the test suite.
-- **What works / evidence:** Not implemented.
-- **What did not / blockers:** Task 7.2b has not produced an accepted
-  low-coherence checkpoint. `experiments/eval_benchmarks.py` is absent, and
-  SwinIR/Restormer/HAT-L implementations plus compatible pretrained weights
-  are not present in the repository. No baseline inference, PSNR/SSIM,
-  FLOP, or 100-iteration CUDA-event comparison has been executed.
-- **Next:** After Task 7.2b acceptance, identify/provide the baseline
-  implementations and checkpoints, implement the evaluator, and run it on
-  Urban100/CBSD68/SOTS on the target GPU before marking complete.
-- **Last updated:** 2026-11-04
+- **What works / evidence:** Model eval across 9 tasks x
+  Urban100/CBSD68/SOTS, max-side 256, 100 CUDA-event iterations.
+  Highlights: SOTS sr2 30.6762, denoise15 31.7407; CBSD68 sr2 27.4486;
+  Urban100 sr2 24.6793; latency 9-82 ms on T4 (obs #47).
+- **What did not / blockers:** Baselines (SwinIR/Restormer/HAT-L) not yet
+  evaluated — no pretrained weights in repo; benchmark summary marks them
+  "pending". Simplified window-based SSIM (standard SSIM verification
+  pending). Synthetic degradations are internal-comparison protocols, not
+  official benchmark protocols; dehaze PSNR ~15-17 dB likely reflects a
+  haze-synthesis mismatch (needs investigation, obs #48: non-local
+  degradation limitation).
+- **Next:** After attempt 4 acceptance, re-run `eval_benchmarks.py` with
+  `--global-context-dim 64` on the new checkpoint; obtain baseline
+  checkpoints and fill pending entries; verify SSIM with a standard
+  implementation.
+- **Last updated:** 2026-11-09
