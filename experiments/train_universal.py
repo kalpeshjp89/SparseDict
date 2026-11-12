@@ -48,8 +48,8 @@ def _coherence_squeeze(
     *,
     steps: int,
     learning_rate: float,
-    max_weight: float = 0.0,
-    max_temperature: float = 0.05,
+    max_weight: float = 64.0,
+    max_temperature: float = 0.005,
 ) -> dict[str, float | int]:
     """Periodic coherence squeeze (Strategy S2).
 
@@ -59,6 +59,14 @@ def _coherence_squeeze(
     epoch boundaries whenever ``mu > threshold`` so the dictionary keeps
     drifting back toward the coherence target instead of compromising
     between task reconstruction and atom separation.
+
+    Defaults follow the proven ``scripts/warmup_coherence.py`` decay recipe
+    (lambda_max=64, small smooth-max temperature): the frame-potential +
+    Welch-hinge loss ALONE can RAISE the max off-diagonal on over-complete
+    banks (its interior minimum equalizes all entries, pushing small ones
+    up), so the smooth-max limb must dominate to actually pull the maximum
+    coherence down (observed 0.2191 -> 0.2330 without it; warmup evidence
+    0.2126 -> 0.1988 with it).
     """
     if steps <= 0:
         raise ValueError(f"steps must be positive; got {steps}")
