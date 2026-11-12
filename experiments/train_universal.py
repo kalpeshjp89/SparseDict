@@ -68,25 +68,26 @@ def _rng_state() -> dict[str, Any]:
 
 
 def _restore_rng_state(state: dict[str, Any]) -> None:
+    def _cpu_bytes(value: Any) -> torch.Tensor:
+        # set_rng_state demands a CPU uint8 tensor; map_location=device in
+        # torch.load can otherwise relocate the saved state to CUDA and make
+        # resume fail with "RNG state must be a torch.ByteTensor".
+        if isinstance(value, (list, tuple)):
+            tensor = torch.tensor(value, dtype=torch.uint8)
+        elif not isinstance(value, torch.Tensor):
+            tensor = torch.as_tensor(value, dtype=torch.uint8)
+        else:
+            tensor = value
+        if tensor.device.type != "cpu":
+            tensor = tensor.cpu()
+        if tensor.dtype != torch.uint8:
+            tensor = tensor.to(torch.uint8)
+        return tensor.contiguous()
+
     random.setstate(state["python"])
-    torch_state = state["torch"]
-    if isinstance(torch_state, (list, tuple)):
-        torch_state = torch.tensor(torch_state, dtype=torch.uint8)
-    elif not isinstance(torch_state, torch.Tensor):
-        torch_state = torch.as_tensor(torch_state, dtype=torch.uint8)
-    elif torch_state.dtype != torch.uint8:
-        torch_state = torch_state.to(torch.uint8).contiguous()
-    torch.set_rng_state(torch_state)
+    torch.set_rng_state(_cpu_bytes(state["torch"]))
     if torch.cuda.is_available() and "cuda" in state:
-        cuda_states = []
-        for cuda_state in state["cuda"]:
-            if isinstance(cuda_state, (list, tuple)):
-                cuda_state = torch.tensor(cuda_state, dtype=torch.uint8)
-            elif not isinstance(cuda_state, torch.Tensor):
-                cuda_state = torch.as_tensor(cuda_state, dtype=torch.uint8)
-            elif cuda_state.dtype != torch.uint8:
-                cuda_state = cuda_state.to(torch.uint8).contiguous()
-            cuda_states.append(cuda_state)
+        cuda_states = [_cpu_bytes(cuda_state) for cuda_state in state["cuda"]]
         torch.cuda.set_rng_state_all(cuda_states)
 
 
@@ -690,7 +691,7 @@ def _restore_checkpoint(
     expected_config: dict[str, int | float],
     expected_training_config: dict[str, Any],
 ) -> tuple[int, int, int, list[dict[str, Any]], float, dict[str, Any]]:
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if checkpoint.get("phase") != expected_phase:
         raise ValueError(f"{path} belongs to a different training phase")
     if checkpoint.get("model_config") != expected_config:
