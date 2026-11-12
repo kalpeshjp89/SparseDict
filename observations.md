@@ -462,3 +462,30 @@ Keep this file updated as new observations arise.
     Keep-alive (window.__ka 60s) re-verified active. Kaggle-credentials
     notebook cell repurposed as diagnostic/restore utility (datasets all
     on Drive; no Kaggle needed).
+
+53. **Proactive coherence interventions implemented (2026-11-12, d129679).**
+    User stopped attempt 4 at ~epoch 21/22 (mu 0.2169, drifting up from
+    0.2038 post-unfreeze; gate needs mu <= 0.20 at e50) and directed three
+    interventions instead of letting task gradients keep degrading atom
+    geometry: (S1) extend dictionary freeze 12 -> 35 epochs, then unfreeze
+    final ~15 epochs at dictionary-lr-scale 0.01 (was 0.1); (S3) Lagrangian
+    adaptive coherence weight lambda_coh = lambda0 * exp(max(0, mu - 0.18)
+    * 15) — dormant at mu <= 0.18, exponential past it (at mu 0.2169 gives
+    lambda 0.05 -> 0.087); (S2) epoch-end coherence squeeze: when
+    validation mu > 0.195, run a 10-step MutualCoherenceLoss-only Adam loop
+    (lr 0.005, warmup-decay recipe) over the dictionary and re-normalize
+    atom rows after each step; post-squeeze mu replaces the epoch's
+    mutual_coherence_max and the record goes into history. Flags:
+    --coherence-adaptive {off,lagrangian}, --coherence-lagrangian-threshold
+    0.18, --coherence-lagrangian-gain 15.0, --coherence-squeeze (+ -threshold
+    / -steps / -lr), --mu-check-steps 25 (mu recompute cadence for the
+    adaptive weight), --resume-ignore-config-mismatch (prints differing
+    training_config keys and continues instead of raising). mu is recomputed
+    from the dictionary every mu_check_steps; effective weight logged as
+    effective_coherence_weight/mu_current in step metrics and lambda_coh in
+    the epoch line. Recovery decision: epoch-12 checkpoint was never saved
+    (freeze ended at e12), so resume is from the ~e21/22 latest.pt with the
+    squeeze + lagrangian actively pulling mu back <= 0.20; schedule change
+    requires --resume-ignore-config-mismatch. Tests: 187 passed / 36
+    skipped (+4 new: lagrangian math, squeeze lowers mu + renormalizes +
+    restores requires_grad, invalid-arg rejection).
