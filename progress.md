@@ -1496,6 +1496,20 @@ the required criterion and independent checkpoint validation pass.
   is from the ~e21/22 latest.pt with `--resume-ignore-config-mismatch`
   (new flag; config-mismatch otherwise still raises). Tests 187 passed.
 
+- **2026-11-12 squeeze disabled + rollback to e23 best (obs #54):** The
+  squeeze RAISED mu 0.2191 -> 0.2330 at e24 (frame-potential + Welch-hinge
+  alone has an interior minimum that pushes small off-diagonals up on
+  over-complete banks; needs the smooth-max limb lambda_max=64, tau small
+  per the warmup recipe — fixed in 3db5a06 for future use). Per user
+  decision the in-loop squeeze is OFF (--no-coherence-squeeze): with the
+  dictionary frozen (e24-35) mu cannot drift, and e23's pre-squeeze
+  validation (PSNR 27.620 / SSIM 0.8492 / mu 0.2185) dominates e24 on all
+  metrics, so latest.pt was restored from best.pt and training resumed at
+  epoch=24, step=46000, mu 0.2185, lambda_coh 0.0890, dictionary frozen.
+  End-of-run plan: after e50 pull mu <= 0.20 via the proven
+  scripts/warmup_coherence.py decay recipe (lr 0.001-0.005, tau 0.005)
+  on the final checkpoint, then Task 7.2c benchmarking.
+
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
