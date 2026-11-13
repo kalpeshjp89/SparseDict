@@ -513,3 +513,27 @@ Keep this file updated as new observations arise.
     <= 0.20 with the proven scripts/warmup_coherence.py decay recipe
     (lr 0.001-0.005, tau 0.005) on the final checkpoint, then Task 7.2c
     benchmarking on the result.
+
+55. **Second silent fresh-run: stale notebook cell; recovery to e36
+    (2026-11-12/14).** After the runtime disconnect (mid-e39), sign-in had
+    expired again; on reconnection the user executed an OLD cell 7 from
+    the Drive notebook (freeze 12, dictionary-lr-scale 0.1, no
+    --coherence-adaptive, no --resume-ignore-config-mismatch). The trainer
+    (now at 3cff195, whose training_config always includes the new keys
+    with defaults) hard-failed the config check on exactly 3 keys
+    (coherence_adaptive, dictionary_lr_scale, freeze_dictionary_epochs)
+    and the graceful fallback started a fresh run. Interrupted via the
+    Runtime menu two-step (open Runtime menu, click "Interrupt execution"
+    — single dispatched clicks on hidden items do NOT work); best.pt
+    (e35, step 70000, PSNR 27.945, SSIM 0.8549, mu 0.2185) secured as
+    best_e35_backup.pt before the fresh run's e1 validation could clobber
+    it; latest.pt had already been overwritten (epoch 0, step 241) —
+    acceptable since e36-38 progress was all below the e35 best.
+    latest.pt restored from best_e35_backup.pt, cell 7 re-fixed (setText
+    after sign-in: my earlier setText edits were lost when the runtime
+    died), relaunched: verified true resume "epoch=36, batch=0,
+    step=70000", [lagrangian] initial mu=0.2185 lambda_coh=0.0890,
+    dictionary_schedule epoch=36 lr=2.000e-06 (unfreeze phase starts
+    exactly here), no fresh-run line, configs match exactly. Lesson:
+    notebook setText edits do not persist without an executed save —
+    re-verify cell text after any kernel restart. 14 epochs remain.
