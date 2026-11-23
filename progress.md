@@ -1510,6 +1510,38 @@ the required criterion and independent checkpoint validation pass.
   scripts/warmup_coherence.py decay recipe (lr 0.001-0.005, tau 0.005)
   on the final checkpoint, then Task 7.2c benchmarking.
 
+- **2026-11-22 handover resume e41-e50 + completion (obs #56, #57):**
+  Status: attempt 4 trained **50/50 epochs** (step 100000); trainer
+  acceptance **not met** (returncode 2), so Task 7.2b stays open.
+  - Resumed on a new owner's Drive from the handed-over
+    `stage_c_run4/latest.pt` (epoch=40, batch=1050, step=81050) with
+    `experiments/phase7_stage_c_run4_resume_colab.ipynb` (flags generated
+    from the checkpoint's saved config, preflight-checked with the trainer's
+    own config functions, kill-switch on "Could not resume").
+    `--resume-ignore-config-mismatch`; only the manifest hashes and the
+    (absent) init/dictionary checkpoint paths+hashes differ.
+  - Data rebuilt from public sources because the original manifests,
+    Stage B checkpoint and incoherent dictionary were not handed over:
+    15,121 images (Rain13K train 13,711, DIV2K 800, SOTS clear 542, CBSD68
+    68) vs 13,419 originally. Images on Colab VM disk (`/content/datasets`);
+    manifests on Drive (`stage_c_coherence_retrain/`).
+  - Validation e41-e50 is on the rebuilt val set (not comparable with
+    e1-40): e41 26.364/0.8298 ... peak e47 26.755/0.8356, final e50
+    26.308/0.8307; mu 0.2194 -> 0.2214. best.pt remains e40 (27.977, old
+    val set).
+  - Acceptance report: coherence_met=false (0.2214 vs <0.20); per-task
+    monotonic false only for sr2/sr3/sr4 — an artifact of comparing e1 on
+    the old val set with e50 on the new one (SR improved on the same
+    benchmark images, see Task 7.2c).
+  - Post-run decay done: `phase7/stage_c_run4/final_incoherent.pth`,
+    mu 0.2214 -> **0.1985** (target_met, 20 steps, lr 0.005, tau 0.005).
+    The strict todo gate (mu < 0.15, non-decreasing per epoch) is still not
+    met.
+  - Next: senior to decide the model-parameter change for the next run.
+    Any `model_config` change (dim, atoms_per_expert, top_k,
+    global_context_dim, logit jitter) requires a NEW output directory —
+    resuming `stage_c_run4` with it would trigger the fresh-run fallback.
+
 ### Task 7.2c
 
 - **Title:** Universal Multi-Task Benchmarking Harness
@@ -1536,8 +1568,27 @@ the required criterion and independent checkpoint validation pass.
   official benchmark protocols; dehaze PSNR ~15-17 dB likely reflects a
   haze-synthesis mismatch (needs investigation, obs #48: non-local
   degradation limitation).
-- **Next:** After attempt 4 acceptance, re-run `eval_benchmarks.py` with
-  `--global-context-dim 64` on the new checkpoint; obtain baseline
-  checkpoints and fill pending entries; verify SSIM with a standard
-  implementation.
-- **Last updated:** 2026-11-09
+- **Attempt 4 re-run (2026-11-22, obs #57):** `eval_benchmarks.py
+  --global-context-dim 64` on Colab T4 (returncode 0, ~26 min per
+  checkpoint) for `final_incoherent.pth` (e50 + coherence decay, mu
+  0.1985) and `best.pt` (e40) on the same Urban100 (100) / CBSD68 (544) /
+  SOTS (1,542) images. Outputs on Drive:
+  `phase7/stage_c_run4/benchmark_summary_final_incoherent.json` and
+  `benchmark_summary_best.json`.
+  - Mean PSNR (9 tasks x 3 datasets): final 24.827 vs e40 24.871
+    (-0.045 dB).
+  - Per-task average delta (final - e40): sr2 +0.11, sr3 +0.07, sr4 +0.09,
+    denoise15 +0.12, denoise25 +0.04, denoise50 -0.11, derain -0.20,
+    dehaze -0.77, jpeg +0.24. SR improves on all three datasets; dehaze
+    regresses on all three.
+  - Final checkpoint, selected values: SOTS sr2 30.20, denoise15 33.30,
+    dehaze 19.32; CBSD68 sr2 26.96, denoise15 29.89; Urban100 sr2 24.03,
+    sr4 18.00. Latency 9-83 ms/image; 7.06 forward GFLOPs per 144x144
+    patch.
+  - Not separated: training-on-rebuilt-data vs post-hoc dictionary decay
+    (pre-decay e50 `latest.pt` not benchmarked).
+- **Next:** obtain baseline checkpoints (SwinIR/Restormer/HAT-L) and fill
+  pending entries; verify SSIM with a standard implementation; restrict
+  SOTS/CBSD68 eval folders to clean images; align eval degradations with
+  training (JPEG quality, haze model).
+- **Last updated:** 2026-11-22
