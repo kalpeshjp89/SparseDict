@@ -537,3 +537,79 @@ Keep this file updated as new observations arise.
     exactly here), no fresh-run line, configs match exactly. Lesson:
     notebook setText edits do not persist without an executed save —
     re-verify cell text after any kernel restart. 14 epochs remain.
+
+56. **Handover resume of attempt 4 on a new Drive with rebuilt data
+    (2026-11-22).** The project was handed over with only the
+    `phase7/stage_c_run4` folder (latest.pt at epoch=40, next_batch=1050,
+    step=81050; e40 val PSNR 27.977 / SSIM 0.8577 / mu 0.2192), copied to
+    the new owner's `MyDrive/SparseDict/phase7/stage_c_run4`. NOT handed
+    over: `stage_b/latest.pt`, `stage_c_coherence_retrain/{train,validation}.csv`
+    and `pretrained_dictionaries_incoherent.pth` — all four are SHA-256
+    hashed into `training_config`, and the run-4 launch cell existed only
+    in the Drive copy of the notebook (repo cell 7 is the stale attempt-3b
+    cell). Resumed via a new notebook,
+    `experiments/phase7_stage_c_run4_resume_colab.ipynb`, that (a) backs up
+    `stage_c_run4` first, (b) GENERATES every flag from latest.pt's own saved
+    `training_config`/`model_config` and checks them with the trainer's real
+    argparse + `_training_config`/`_model_config` before launch (only the 6
+    path/hash keys of manifests + init/dictionary checkpoints may differ),
+    and (c) kills the trainer if it prints "Could not resume" (the
+    fresh-run fallback at train_universal.py:1038-1067 otherwise wipes
+    metrics/steps logs and later latest.pt/best.pt). Resume verified:
+    "Resuming fine_tune at epoch=41, batch=1050, step=81050", [lagrangian]
+    initial mu=0.2192 lambda_coh=0.0901, dictionary_schedule lr=2e-06; step
+    log continues 81050 -> 81060 with no restart, history e1-40 byte-identical,
+    weights 7.5% (relative L2) from the handed-over latest.pt vs 60% from a
+    fresh-run checkpoint. Config diff = exactly dictionary_checkpoint(+sha),
+    init_checkpoint(+sha), train/validation_manifest_sha256; all
+    hyperparameters and model_config identical; `--resume-ignore-config-mismatch`.
+    **Data rebuilt from public sources** (seed 2027, 10% val): CBSD68 68 +
+    SOTS clear 542 (Kaggle) + Rain13K train/target 13,711 (HF
+    dronefreak/Rain13K) + DIV2K 800 = 15,121 images (149,699 / 16,632 rows)
+    vs the original 13,419 (132,847 / 14,762) — the original Rain13K copy
+    on Drive was evidently partial. Consequence: validation from e41 uses a
+    different image set and is NOT comparable with e1-40 (e41 val 26.364;
+    SR tasks drop ~3-5 dB on the Rain13K-heavy set while derain/dehaze/
+    lowlight rise). Pitfalls hit: (1) HF snapshot_download straight onto the
+    Drive FUSE mount was ~3 files/s (hours for Rain13K) and filled the
+    15 GB free Drive quota -> images now live on the Colab VM disk
+    (`/content/datasets`, re-downloaded each session), only checkpoints/
+    logs/manifests on Drive; this also removes the Drive-mount-drop crash
+    mode ("all 132847 manifest rows failed to load"). (2) After an
+    interrupted download, `prepare_phase7_datasets.py` treats a partially
+    filled `Outdoor-Rain/` as complete, and `resolve_clean_image_dir`
+    silently falls back to `test/Rain100H/target` (100 images) when
+    `train/target` is empty — fixed in the notebook by an explicit
+    `allow_patterns=['train/target/*']` fetch and pinning
+    DATASET_PATH_OVERRIDES['outdoor-rain'] to train/target.
+
+57. **Attempt 4 complete: 50/50 epochs, post-run decay, benchmark
+    (2026-11-22).** Epochs 41-50 (new val set) PSNR/SSIM: 26.364/0.8298,
+    26.262/0.8306, 26.405/0.8316, 26.432/0.8313, 26.456/0.8288,
+    26.624/0.8335, 26.755/0.8356, 26.533/0.8311, 26.654/0.8349,
+    26.308/0.8307; mu drifted 0.2194 -> 0.2214 during the unfreeze phase
+    (dictionary lr 2e-06). best.pt stays e40 (27.977 on the OLD val set).
+    Trainer acceptance: passed=false, returncode 2 — coherence_met=false
+    (0.2214 vs 0.20) and per-task monotonic false for sr2/sr3/sr4 only (the
+    combined gate compares e1 on the old val set, e.g. sr2 30.72, with e50
+    on the new set, ~26 — a validation-switch artifact; on the old set SR
+    rose e1 -> e40, 30.72 -> 31.68). Post-run decay
+    (`warmup_coherence.py --init-checkpoint latest.pt --output
+    final_incoherent.pth --steps 2000 --target 0.20 --learning-rate 0.005
+    --max-temperature 0.005`): target_met in 20 steps, mu 0.2214 -> 0.1985
+    (Welch bound 0.1211). Task 7.2c harness (`eval_benchmarks.py
+    --global-context-dim 64`, ~26 min each on T4) on the SAME images for
+    final_incoherent.pth vs best.pt (e40): mean PSNR over 9 tasks x 3
+    datasets 24.827 vs 24.871 (-0.045 dB). Per-task average delta: sr2
+    +0.11, sr3 +0.07, sr4 +0.09, denoise15 +0.12, denoise25 +0.04,
+    denoise50 -0.11, derain -0.20, dehaze -0.77, jpeg +0.24 — SR improves on
+    every dataset (confirms the SR gate failure is a val-switch artifact);
+    dehaze regresses on all three. The final checkpoint mixes 10 epochs on
+    rebuilt data with a post-hoc dictionary decay (no fine-tune after it),
+    so the two effects are not separated (benchmarking pre-decay e50
+    latest.pt would isolate them; not run). Harness caveats unchanged:
+    SOTS (1,542) and CBSD68 (544) image counts include hazy/noisy copies
+    treated as clean targets, eval degradations differ from training
+    (JPEG q10, different haze model), simplified SSIM (~0.99), baselines
+    still pending. Latency 9-83 ms/image on T4; 7.06 forward GFLOPs per
+    144x144 patch.
